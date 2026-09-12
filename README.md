@@ -34,6 +34,23 @@ You can build a hook, an indexer or a front end on this SDK under MIT terms. Dep
 
 ---
 
+## Integrating with an agent
+
+Two prompts written to be pasted whole into Claude Code (or any coding agent), in the repo
+you want the integration in. They carry the constraints that have actually cost this
+project time — the missing factory, the 0.102s block, the 10^12 decimals trap, the
+irreversible calls — so an agent does not have to rediscover them at your expense.
+
+- **[Ship a DEX on Latch](./prompts/dex-integration.md)** — swap and LP UI against the
+  shared Vault and pool managers, with the three places a fee wallet can actually earn.
+- **[Run a launchpad on Latch](./prompts/launchpad-integration.md)** — one-call token
+  launches through `LaunchpadKit`, with the anti-sniper decay schedule and the list of
+  things that cannot be undone.
+
+Fill in the four-line `## My setup` block at the top of the prompt before you send it.
+
+---
+
 ## Install
 
 ```bash

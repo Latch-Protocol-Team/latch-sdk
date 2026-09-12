@@ -48,8 +48,10 @@ const DEST =
 /** Copied verbatim. Anything not named here does not travel.
  *  `assets` holds the repo's social-preview image, which the README embeds.
  *  It is NOT in package.json `files`, so it never enters the npm tarball —
- *  a 90 KB PNG has no business in a dependency. */
-const INCLUDE_DIRS = ['src', 'test', 'scripts', 'assets']
+ *  a 90 KB PNG has no business in a dependency.
+ *  `prompts` holds the paste-into-an-agent integration prompts. Same reasoning:
+ *  they are repository content for a human, not package content. */
+const INCLUDE_DIRS = ['src', 'test', 'scripts', 'assets', 'prompts']
 const INCLUDE_FILES = [
   'package.json',
   'package-lock.json',
