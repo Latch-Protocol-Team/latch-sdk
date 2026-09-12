@@ -12,6 +12,12 @@
   <a href="https://x.com/Ox_Forged">Developer on X</a>
 </p>
 
+<p align="center">
+  <b>Building on Latch with a coding agent?</b> Start with a prompt, not the docs:<br>
+  <a href="./prompts/dex-integration.md">🔁 Ship a DEX</a> &nbsp;·&nbsp;
+  <a href="./prompts/launchpad-integration.md">🚀 Run a launchpad</a>
+</p>
+
 # @latchprotocol/sdk
 
 TypeScript SDK for **LatchProtocol** — a singleton AMM with hooks, deployed on chains where Uniswap v4 is not.
