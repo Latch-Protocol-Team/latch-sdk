@@ -1,7 +1,7 @@
 {
   "name": "@latchprotocol/sdk",
   "version": "0.1.0",
-  "description": "MIT-licensed TypeScript SDK for LatchProtocol: pool keys, hook permission bitmaps, typed events and an indexer data model.",
+  "description": "MIT TypeScript SDK for LatchProtocol — deployed contract addresses, pool key/id derivation, hook permission bitmaps, typed events, and the Latch registry. Build hooks without importing GPL Solidity.",
   "license": "MIT",
   "publishConfig": {
     "access": "public"
@@ -68,7 +68,13 @@
     "hooks",
     "defi",
     "ethereum",
-    "sdk"
+    "sdk",
+    "typescript",
+    "viem",
+    "concentrated-liquidity",
+    "dex",
+    "launchpad",
+    "robinhood-chain"
   ],
   "dependencies": {
     "viem": "^2.21.0"

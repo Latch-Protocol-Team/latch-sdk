@@ -2,32 +2,7 @@
 
 TypeScript SDK for **LatchProtocol** — a singleton AMM with hooks, deployed on chains where Uniswap v4 is not.
 
-```bash
-npm install @latchprotocol/sdk
-```
-
-```ts
-import { LATCH_DEPLOYMENTS, getDeployment, requireContract } from "@latchprotocol/sdk";
-
-const latch = getDeployment(4663);          // Robinhood Chain, undefined if unknown
-latch.vault;                                 // 0x78e8359c…
-requireContract(latch, "launchpadKit");      // throws by name if not deployed there
-```
-
-> ### This repository is a mirror
->
-> The source of truth is `packages/sdk` in the LatchProtocol monorepo, and this
-> repo is generated from it by `scripts/sync-public-repo.mjs`. **Edits made here
-> are overwritten on the next sync.** Open an issue or a PR and it will be
-> applied upstream and mirrored back — that way the package you install and the
-> package the protocol is built against cannot drift, which is the failure this
-> arrangement exists to prevent.
->
-> One deliberate difference: the ABI generators are removed here. They read
-> Foundry build artifacts that only exist in the monorepo, so `npm run build` is
-> plain `tsc`. The generated ABIs are committed, so a clone builds and tests
-> without them.
-
+The SDK gives you the protocol's domain types (pool keys, pool ids, currencies, balance deltas, fees), first-class helpers for the **hook permission bitmap**, typed definitions for every event the contracts emit, and an indexer data model for analytics.
 
 ---
 
