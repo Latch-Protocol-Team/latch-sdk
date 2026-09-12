@@ -1,0 +1,89 @@
+{
+  "name": "@latchprotocol/sdk",
+  "version": "0.1.0",
+  "description": "MIT-licensed TypeScript SDK for LatchProtocol: pool keys, hook permission bitmaps, typed events and an indexer data model.",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./events": {
+      "types": "./dist/events/index.d.ts",
+      "import": "./dist/events/index.js",
+      "default": "./dist/events/index.js"
+    },
+    "./indexer": {
+      "types": "./dist/indexer/index.d.ts",
+      "import": "./dist/indexer/index.js",
+      "default": "./dist/indexer/index.js"
+    },
+    "./deployments": {
+      "types": "./dist/deployments/index.d.ts",
+      "import": "./dist/deployments/index.js",
+      "default": "./dist/deployments/index.js"
+    },
+    "./registry": {
+      "types": "./dist/registry/index.d.ts",
+      "import": "./dist/registry/index.js",
+      "default": "./dist/registry/index.js"
+    },
+    "./launchpad": {
+      "types": "./dist/launchpad/index.d.ts",
+      "import": "./dist/launchpad/index.js",
+      "default": "./dist/launchpad/index.js"
+    },
+    "./schema.graphql": "./schema.graphql",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "schema.graphql",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "latchprotocol",
+    "amm",
+    "hooks",
+    "defi",
+    "ethereum",
+    "sdk"
+  ],
+  "dependencies": {
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0",
+    "@types/node": "^22.7.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Latch-Protocol-Team/latch-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Latch-Protocol-Team/latch-sdk/issues"
+  },
+  "homepage": "https://github.com/Latch-Protocol-Team/latch-sdk#readme"
+}

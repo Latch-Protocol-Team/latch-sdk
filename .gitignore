@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.tgz
+
+# Never, on any branch. This package ships addresses and ABIs — both public
+# facts — and must never grow a reason to hold a key.
+.env
+.env.*
+!.env.example
+*.key
+*.pem

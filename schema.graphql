@@ -1,0 +1,542 @@
+# SPDX-License-Identifier: MIT
+#
+# LatchProtocol indexer schema.
+#
+# The data model an analytics backend materialises from protocol logs. It is
+# written in subgraph-flavoured GraphQL (`@entity`, `@derivedFrom`) so it can be
+# dropped into The Graph, Ponder, Envio or any store that speaks the same
+# dialect; the equivalent TypeScript entity types live in `src/indexer`.
+#
+# Shape of the model:
+#
+#   Protocol -< PoolManager -< Pool -< Swap | LiquidityChange | Donate
+#                               |
+#                               +-- Hook          (many pools per hook)
+#                               +-- Token x2      (currency0, currency1)
+#                               +-- CLPosition    (concentrated liquidity)
+#                               +-- BinPosition   (liquidity book)
+#
+# Every event-derived entity keeps a pointer back to the Pool it belongs to, and
+# every Pool keeps a pointer to its Hook, so "all swaps routed through hook X"
+# is a two-hop traversal rather than a scan.
+
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+
+"Which pool manager owns a pool, and therefore which maths and events apply."
+enum PoolType {
+  "Concentrated liquidity: positions span a tick range."
+  CL
+  "Liquidity book: positions occupy discrete bins."
+  BIN
+}
+
+"Direction of a liquidity change."
+enum LiquidityChangeType {
+  ADD
+  REMOVE
+}
+
+"Whether a pool manager was paused or unpaused."
+enum PauseState {
+  PAUSED
+  UNPAUSED
+}
+
+# ---------------------------------------------------------------------------
+# Protocol-level singletons
+# ---------------------------------------------------------------------------
+
+"Global roll-up. Exactly one row, id = \"latchprotocol\"."
+type Protocol @entity {
+  id: ID!
+  "Vault holding every pool's reserves."
+  vault: Vault
+  "Pool managers registered against the vault."
+  poolManagers: [PoolManager!]! @derivedFrom(field: "protocol")
+  poolCount: BigInt!
+  hookCount: BigInt!
+  swapCount: BigInt!
+  "Address currently allowed to set per-pool protocol fees."
+  protocolFeeController: Bytes
+}
+
+"The singleton that custodies all balances and settles deltas."
+type Vault @entity {
+  id: ID!
+  address: Bytes!
+  owner: Bytes
+  "Pending owner during a two-step ownership handover."
+  pendingOwner: Bytes
+  "Pool managers the vault has accepted as apps."
+  registeredApps: [PoolManager!]! @derivedFrom(field: "vault")
+  registeredAppCount: BigInt!
+}
+
+"A pool manager contract. Source of Initialize, Swap and liquidity events."
+type PoolManager @entity {
+  id: ID!
+  address: Bytes!
+  poolType: PoolType!
+  protocol: Protocol!
+  vault: Vault
+  owner: Bytes
+  protocolFeeController: Bytes
+  paused: Boolean!
+  poolCount: BigInt!
+  "Bin pools only: the largest bin step the manager will accept."
+  maxBinStep: Int
+  "Bin pools only: minimum share supply in the active bin before a donate is allowed."
+  minBinSharesForDonate: BigInt
+  pools: [Pool!]! @derivedFrom(field: "poolManager")
+}
+
+# ---------------------------------------------------------------------------
+# Reference data
+# ---------------------------------------------------------------------------
+
+"An ERC-20, or the native asset at the zero address."
+type Token @entity {
+  id: ID!
+  address: Bytes!
+  symbol: String
+  name: String
+  decimals: Int
+  isNative: Boolean!
+  poolCount: BigInt!
+}
+
+"""
+A hook contract.
+
+Unlike Uniswap v4, a hook's permissions are not encoded in its address: the pool
+key's `parameters` word carries a 16-bit registration bitmap that the pool
+manager checks against the hook's own `getHooksRegistrationBitmap()`. That means
+one hook address can serve pools with different bitmaps, so the per-callback
+flags below are recorded on the Pool as well as here.
+"""
+type Hook @entity {
+  id: ID!
+  address: Bytes!
+  "Bitmap reported by the hook itself, if it has been read on-chain."
+  registrationBitmap: Int
+  "Distinct registration bitmaps observed across this hook's pools."
+  observedBitmaps: [Int!]!
+  poolCount: BigInt!
+  swapCount: BigInt!
+  pools: [Pool!]! @derivedFrom(field: "hook")
+  firstSeenBlock: BigInt!
+  firstSeenTimestamp: BigInt!
+}
+
+"""
+The decoded permission set behind a registration bitmap.
+
+Bit offsets are identical for both pool types; only the names of bits 2-5, 12
+and 13 differ, which is why both spellings appear here. A `*ReturnsDelta` flag is
+only valid alongside its base callback.
+"""
+type HookPermissions @entity {
+  "Composite of pool type and bitmap, e.g. \"CL-0x0044\"."
+  id: ID!
+  poolType: PoolType!
+  bitmap: Int!
+
+  beforeInitialize: Boolean!         # bit 0
+  afterInitialize: Boolean!          # bit 1
+  beforeAddLiquidity: Boolean!       # bit 2  (CL)
+  afterAddLiquidity: Boolean!        # bit 3  (CL)
+  beforeRemoveLiquidity: Boolean!    # bit 4  (CL)
+  afterRemoveLiquidity: Boolean!     # bit 5  (CL)
+  beforeMint: Boolean!               # bit 2  (BIN)
+  afterMint: Boolean!                # bit 3  (BIN)
+  beforeBurn: Boolean!               # bit 4  (BIN)
+  afterBurn: Boolean!                # bit 5  (BIN)
+  beforeSwap: Boolean!               # bit 6
+  afterSwap: Boolean!                # bit 7
+  beforeDonate: Boolean!             # bit 8
+  afterDonate: Boolean!              # bit 9
+  beforeSwapReturnsDelta: Boolean!   # bit 10
+  afterSwapReturnsDelta: Boolean!    # bit 11
+  afterAddLiquidityReturnsDelta: Boolean!    # bit 12 (CL)
+  afterRemoveLiquidityReturnsDelta: Boolean! # bit 13 (CL)
+  afterMintReturnsDelta: Boolean!            # bit 12 (BIN)
+  afterBurnReturnsDelta: Boolean!            # bit 13 (BIN)
+}
+
+# ---------------------------------------------------------------------------
+# Pools
+# ---------------------------------------------------------------------------
+
+"""
+One pool inside the singleton, keyed by its pool id (keccak256 of the pool key).
+
+The pool key fields are stored verbatim so the id can be recomputed and audited
+without another RPC round trip.
+"""
+type Pool @entity {
+  "Pool id: keccak256 of the six pool-key words."
+  id: ID!
+  poolType: PoolType!
+  poolManager: PoolManager!
+
+  # --- pool key ---
+  token0: Token!
+  token1: Token!
+  currency0: Bytes!
+  currency1: Bytes!
+  "Null when the pool runs without a hook."
+  hook: Hook
+  hooksAddress: Bytes!
+  "Raw `fee` field of the pool key."
+  feeRaw: Int!
+  "Static LP fee in pips, null when the pool uses a dynamic fee."
+  staticLpFee: Int
+  "True when `feeRaw` is the dynamic-fee marker."
+  isDynamicFee: Boolean!
+  "Packed `parameters` word of the pool key."
+  parameters: Bytes!
+
+  # --- decoded parameters ---
+  hooksRegistrationBitmap: Int!
+  hookPermissions: HookPermissions!
+  "Concentrated liquidity only."
+  tickSpacing: Int
+  "Liquidity book only."
+  binStep: Int
+
+  # --- mutable state ---
+  "Most recent dynamic LP fee reported by the hook, in pips."
+  currentLpFee: Int
+  "Packed protocol fee: low 12 bits zero-for-one, high 12 bits one-for-zero."
+  protocolFee: Int!
+  protocolFeeZeroForOne: Int!
+  protocolFeeOneForZero: Int!
+  "Concentrated liquidity: current price as a Q64.96 square root."
+  sqrtPriceX96: BigInt
+  "Concentrated liquidity: current tick."
+  tick: Int
+  "Concentrated liquidity: in-range liquidity."
+  liquidity: BigInt
+  "Liquidity book: currently active bin."
+  activeId: Int
+
+  # --- cumulative statistics ---
+  swapCount: BigInt!
+  liquidityChangeCount: BigInt!
+  donateCount: BigInt!
+  volumeToken0: BigInt!
+  volumeToken1: BigInt!
+
+  # --- provenance ---
+  createdAtBlock: BigInt!
+  createdAtTimestamp: BigInt!
+  createdAtTransaction: Bytes!
+
+  # --- relationships ---
+  swaps: [Swap!]! @derivedFrom(field: "pool")
+  liquidityChanges: [LiquidityChange!]! @derivedFrom(field: "pool")
+  donates: [Donate!]! @derivedFrom(field: "pool")
+  clPositions: [CLPosition!]! @derivedFrom(field: "pool")
+  binPositions: [BinPosition!]! @derivedFrom(field: "pool")
+  protocolFeeUpdates: [ProtocolFeeUpdate!]! @derivedFrom(field: "pool")
+  dynamicFeeUpdates: [DynamicLpFeeUpdate!]! @derivedFrom(field: "pool")
+}
+
+# ---------------------------------------------------------------------------
+# Event-derived facts
+# ---------------------------------------------------------------------------
+
+"A transaction that touched the protocol."
+type Transaction @entity {
+  id: ID!
+  hash: Bytes!
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  from: Bytes!
+  gasUsed: BigInt
+  gasPrice: BigInt
+}
+
+"""
+One swap. Derived from `CLPoolManager.Swap` or `BinPoolManager.Swap`.
+
+Amounts are signed from the pool's point of view: a negative amount left the
+pool, a positive amount entered it.
+"""
+type Swap @entity {
+  "transactionHash-logIndex"
+  id: ID!
+  pool: Pool!
+  poolType: PoolType!
+  "The hook attached to the pool at the time of the swap, if any."
+  hook: Hook
+  transaction: Transaction!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  logIndex: Int!
+
+  "Caller recorded by the pool manager - usually a router, not the end user."
+  sender: Bytes!
+  "Signed change in currency0."
+  amount0: BigInt!
+  "Signed change in currency1."
+  amount1: BigInt!
+  "True when currency0 was the input."
+  zeroForOne: Boolean!
+  "LP fee actually charged, in pips."
+  fee: Int!
+  "Packed protocol fee in force for this swap."
+  protocolFee: Int!
+
+  "Concentrated liquidity: price after the swap."
+  sqrtPriceX96: BigInt
+  "Concentrated liquidity: tick after the swap."
+  tick: Int
+  "Concentrated liquidity: in-range liquidity at the swap."
+  liquidity: BigInt
+  "Liquidity book: active bin after the swap."
+  activeId: Int
+}
+
+"""
+A liquidity change. Unifies `CLPoolManager.ModifyLiquidity` with the bin
+manager's `Mint` and `Burn`, so a dashboard can chart both pool types together.
+"""
+type LiquidityChange @entity {
+  "transactionHash-logIndex"
+  id: ID!
+  pool: Pool!
+  poolType: PoolType!
+  hook: Hook
+  transaction: Transaction!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  logIndex: Int!
+
+  changeType: LiquidityChangeType!
+  sender: Bytes!
+  "Sub-account discriminator supplied by the caller."
+  salt: Bytes!
+
+  "Concentrated liquidity: lower bound of the position."
+  tickLower: Int
+  "Concentrated liquidity: upper bound of the position."
+  tickUpper: Int
+  "Concentrated liquidity: signed change in liquidity."
+  liquidityDelta: BigInt
+  "Concentrated liquidity: the affected position."
+  clPosition: CLPosition
+
+  "Liquidity book: bins touched by this action."
+  binIds: [BigInt!]
+  "Liquidity book: packed per-bin amounts, one word per bin id."
+  binAmounts: [Bytes!]
+  "Liquidity book: packed composition fee, mint only."
+  compositionFeeAmount: Bytes
+  "Liquidity book: packed protocol fee taken, mint only."
+  feeAmountToProtocol: Bytes
+}
+
+"A donation of tokens straight to liquidity providers, bypassing a swap."
+type Donate @entity {
+  id: ID!
+  pool: Pool!
+  poolType: PoolType!
+  hook: Hook
+  transaction: Transaction!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  logIndex: Int!
+
+  sender: Bytes!
+  amount0: BigInt!
+  amount1: BigInt!
+  "Concentrated liquidity: tick that received the donation."
+  tick: Int
+  "Liquidity book: bin that received the donation."
+  binId: Int
+}
+
+# ---------------------------------------------------------------------------
+# Positions
+# ---------------------------------------------------------------------------
+
+"A concentrated-liquidity position: owner, range and salt within one pool."
+type CLPosition @entity {
+  "poolId-owner-tickLower-tickUpper-salt"
+  id: ID!
+  pool: Pool!
+  owner: Bytes!
+  tickLower: Int!
+  tickUpper: Int!
+  salt: Bytes!
+  liquidity: BigInt!
+  liquidityChanges: [LiquidityChange!]! @derivedFrom(field: "clPosition")
+  createdAtBlock: BigInt!
+  createdAtTimestamp: BigInt!
+  lastUpdatedBlock: BigInt!
+}
+
+"A liquidity-book position: shares held in one bin of one pool."
+type BinPosition @entity {
+  "poolId-owner-binId-salt"
+  id: ID!
+  pool: Pool!
+  owner: Bytes!
+  binId: BigInt!
+  salt: Bytes!
+  shares: BigInt!
+  createdAtBlock: BigInt!
+  createdAtTimestamp: BigInt!
+  lastUpdatedBlock: BigInt!
+}
+
+# ---------------------------------------------------------------------------
+# Fee governance
+# ---------------------------------------------------------------------------
+
+"A change to a pool's protocol fee, from `ProtocolFeeUpdated`."
+type ProtocolFeeUpdate @entity {
+  id: ID!
+  pool: Pool!
+  transaction: Transaction!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  logIndex: Int!
+  previousProtocolFee: Int
+  protocolFee: Int!
+  protocolFeeZeroForOne: Int!
+  protocolFeeOneForZero: Int!
+}
+
+"A dynamic LP fee update pushed by a hook, from `DynamicLPFeeUpdated`."
+type DynamicLpFeeUpdate @entity {
+  id: ID!
+  pool: Pool!
+  hook: Hook
+  transaction: Transaction!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  logIndex: Int!
+  previousLpFee: Int
+  dynamicLpFee: Int!
+}
+
+"A change of the address allowed to set protocol fees."
+type ProtocolFeeControllerUpdate @entity {
+  id: ID!
+  poolManager: PoolManager!
+  transaction: Transaction!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  logIndex: Int!
+  previousController: Bytes
+  controller: Bytes!
+}
+
+# ---------------------------------------------------------------------------
+# Administration
+# ---------------------------------------------------------------------------
+
+"A pause or unpause of a pool manager."
+type PauseEvent @entity {
+  id: ID!
+  poolManager: PoolManager!
+  state: PauseState!
+  account: Bytes!
+  transaction: Transaction!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  logIndex: Int!
+}
+
+"An ownership handover on any owned contract, including the two-step start."
+type OwnershipTransfer @entity {
+  id: ID!
+  "Contract whose ownership moved."
+  contractAddress: Bytes!
+  previousOwner: Bytes!
+  newOwner: Bytes!
+  "True for `OwnershipTransferStarted`, false for `OwnershipTransferred`."
+  pending: Boolean!
+  transaction: Transaction!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  logIndex: Int!
+}
+
+"A pool manager accepted by the vault as a settlement app."
+type AppRegistration @entity {
+  id: ID!
+  vault: Vault!
+  app: Bytes!
+  transaction: Transaction!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  logIndex: Int!
+}
+
+# ---------------------------------------------------------------------------
+# Vault claim tokens
+# ---------------------------------------------------------------------------
+
+"A holder of vault claim tokens."
+type Account @entity {
+  id: ID!
+  address: Bytes!
+  balances: [VaultBalance!]! @derivedFrom(field: "account")
+}
+
+"One account's claim-token balance in one currency."
+type VaultBalance @entity {
+  "account-currency"
+  id: ID!
+  account: Account!
+  token: Token!
+  currency: Bytes!
+  balance: BigInt!
+  lastUpdatedBlock: BigInt!
+}
+
+"A claim-token transfer inside the vault."
+type VaultTransfer @entity {
+  id: ID!
+  caller: Bytes!
+  from: Bytes!
+  to: Bytes!
+  token: Token!
+  currency: Bytes!
+  amount: BigInt!
+  transaction: Transaction!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  logIndex: Int!
+}
+
+"A claim-token allowance change."
+type VaultApproval @entity {
+  id: ID!
+  owner: Bytes!
+  spender: Bytes!
+  token: Token!
+  currency: Bytes!
+  amount: BigInt!
+  transaction: Transaction!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  logIndex: Int!
+}
+
+"An account-wide operator grant or revocation."
+type VaultOperatorSet @entity {
+  id: ID!
+  owner: Bytes!
+  operator: Bytes!
+  approved: Boolean!
+  transaction: Transaction!
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  logIndex: Int!
+}
