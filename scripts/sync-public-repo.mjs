@@ -45,8 +45,11 @@ const DEST =
     ? args[destArg + 1]
     : join(SDK, '..', '..', '..', 'latch-sdk')
 
-/** Copied verbatim. Anything not named here does not travel. */
-const INCLUDE_DIRS = ['src', 'test', 'scripts']
+/** Copied verbatim. Anything not named here does not travel.
+ *  `assets` holds the repo's social-preview image, which the README embeds.
+ *  It is NOT in package.json `files`, so it never enters the npm tarball —
+ *  a 90 KB PNG has no business in a dependency. */
+const INCLUDE_DIRS = ['src', 'test', 'scripts', 'assets']
 const INCLUDE_FILES = [
   'package.json',
   'package-lock.json',
@@ -140,7 +143,7 @@ if (!DRY) {
   pkg.scripts.prepublishOnly = 'npm run build'
   pkg.repository = { type: 'git', url: 'git+https://github.com/Latch-Protocol-Team/latch-sdk.git' }
   pkg.bugs = { url: 'https://github.com/Latch-Protocol-Team/latch-sdk/issues' }
-  pkg.homepage = 'https://github.com/Latch-Protocol-Team/latch-sdk#readme'
+  pkg.homepage = 'https://latch.guru'
   writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + String.fromCharCode(10))
 }
 

@@ -1,3 +1,17 @@
+<p align="center">
+  <a href="https://latch.guru">
+    <img src="https://raw.githubusercontent.com/Latch-Protocol-Team/latch-sdk/main/assets/og.png"
+         alt="Latch Protocol — hooks for a bigger ecosystem" width="640">
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://latch.guru">Website</a> ·
+  <a href="https://www.npmjs.com/package/@latchprotocol/sdk">npm</a> ·
+  <a href="https://github.com/Latch-Protocol-Team">GitHub</a> ·
+  <a href="https://x.com/Ox_Forged">Developer on X</a>
+</p>
+
 # @latchprotocol/sdk
 
 TypeScript SDK for **LatchProtocol** — a singleton AMM with hooks, deployed on chains where Uniswap v4 is not.
@@ -375,6 +389,24 @@ TypeScript is configured with `strict`, `noUncheckedIndexedAccess`, `exactOption
 ### Verifying the encoding
 
 The bitmap offsets, the `parameters` layout and the dependency rules were read from the protocol's own definitions, not assumed from Uniswap v4. The pool id derivation is additionally pinned by a fixture in `test/events.test.ts`: the same six key words hashed by the EVM (`keccak256(poolKey, 0xc0)`) and by `poolKeyToId` produce the identical digest.
+
+---
+
+## Links
+
+| | |
+|---|---|
+| Website | <https://latch.guru> |
+| Package | <https://www.npmjs.com/package/@latchprotocol/sdk> |
+| Source | <https://github.com/Latch-Protocol-Team/latch-sdk> |
+| Org | <https://github.com/Latch-Protocol-Team> |
+| Developer | <https://x.com/Ox_Forged> |
+
+Issues and pull requests belong on the mirror repo above. Note that `src/`,
+`test/`, `scripts/` and `assets/` there are **generated output** — they are
+overwritten wholesale on every sync from the monorepo, so a patch applied
+directly to those directories is lost on the next release. Open an issue and
+the change is made upstream.
 
 ---
 

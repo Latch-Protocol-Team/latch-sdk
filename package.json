@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "MIT TypeScript SDK for LatchProtocol — deployed contract addresses, pool key/id derivation, hook permission bitmaps, typed events, and the Latch registry. Build hooks without importing GPL Solidity.",
   "license": "MIT",
+  "homepage": "https://latch.guru",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Latch-Protocol-Team/latch-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Latch-Protocol-Team/latch-sdk/issues"
+  },
   "publishConfig": {
     "access": "public"
   },
@@ -83,13 +91,5 @@
     "typescript": "^5.6.0",
     "vitest": "^2.1.0",
     "@types/node": "^22.7.0"
-  },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Latch-Protocol-Team/latch-sdk.git"
-  },
-  "bugs": {
-    "url": "https://github.com/Latch-Protocol-Team/latch-sdk/issues"
-  },
-  "homepage": "https://github.com/Latch-Protocol-Team/latch-sdk#readme"
+  }
 }
