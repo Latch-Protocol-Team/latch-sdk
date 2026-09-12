@@ -42,11 +42,15 @@ chain and does the whole launch in one call. I am NOT deploying the kit or the h
 
 ## Ground rules — follow these exactly
 
-1. ADDRESSES COME FROM THE SDK.
+1. ADDRESSES AND LAUNCH MATHS COME FROM THE SDK. DO NOT HAND-ROLL EITHER.
 
    npm install @latchprotocol/sdk viem
 
-   import { getDeployment, requireContract, launchpad } from "@latchprotocol/sdk"
+   import {
+     getDeployment, requireContract,
+     sqrtPriceForLaunch, buildLaunchParams, validateLaunchParams, describeLaunch, PRESET,
+   } from "@latchprotocol/sdk"
+
    const d = getDeployment(4663)
    const kit = requireContract(d, "launchpadKit")   // throws a sentence, not a stack trace
 
@@ -54,30 +58,54 @@ chain and does the whole launch in one call. I am NOT deploying the kit or the h
    NOT DEPLOYED on that chain. It is never the zero address and must never be treated as
    one.
 
-2. `Preset.Custom` IS ZERO.
+   The SDK ships `sqrtPriceForLaunch`, `PRESET`, `buildLaunchParams`,
+   `validateLaunchParams` and `describeLaunch`. Use them. If you find yourself writing
+   Q64.96 arithmetic, a `Math.sqrt`, or the literal `0` for a preset, stop — that is the
+   thing these exist to prevent, and every one of those mistakes is silent.
+
+2. `Preset.Custom` IS ZERO — pass the preset BY NAME.
 
    The enum is `Custom, FairLaunch, AntiSniperAggressive, Stealth, NoTax`. An uninitialised
    field, a missing form value, or `preset: 0` means Custom — and Custom then reads
    `initialFeeBips`, `finalFeeBips`, `decayBlocks` and `enabled`, which a preset-driven UI
    probably left at zero. That is a launch with no anti-sniper protection at all, and it
-   will not error. Validate the preset explicitly; never let a default reach the call.
+   will not error.
 
-3. DECIMALS AND `sqrtPriceX96`.
+   Use `PRESET.FairLaunch` or the string `"FairLaunch"`, never a bare number.
+   `buildLaunchParams` throws if you pass Custom without a schedule, and
+   `validateLaunchParams` reports an all-zero Custom as an error. Do not defeat either by
+   filling the fields with zeros to make the check pass.
 
-   `sqrtPriceX96` is sqrt(price) in Q64.96 where price is currency1 per currency0 AFTER
-   address sorting, in RAW units. Two traps stack here:
-     - sorting: which of your two tokens is currency0 depends on the address comparison, so
-       the price may need inverting;
-     - decimals: a 6-decimal quote against an 18-decimal launch token is a 10^12 factor.
-   Read `decimals()` off both contracts. Compute the value, print the human price it
-   implies, and make me confirm it before broadcasting. `initialize` cannot be undone.
+3. THE PRICE COMES FROM `sqrtPriceForLaunch`.
 
-4. SIMULATE, THEN SHOW ME, THEN SEND.
+   const price = sqrtPriceForLaunch({
+     launchToken, quoteToken,
+     launchDecimals, quoteDecimals,        // read decimals() off BOTH contracts
+     quotePerLaunchToken: "0.05",          // a STRING. A float loses the digits that matter.
+   })
 
-   Call `previewSchedule(params)` and `computePoolKey(...)` first, and render: the pool id,
-   the opening price in human units, the fee at block 0 and at the end of the window, the
-   wall-clock length of that window (blocks x 0.102s, not blocks x 12s), and when trading
-   opens. A dry run is the default; sending requires an explicit flag.
+   It handles both traps that stack here — address sorting (which decides whether the pool
+   holds your price or its reciprocal) and decimals (a 6-decimal quote against an
+   18-decimal launch token is a 10^12 factor). It returns `poolPrice` and
+   `launchTokenIsCurrency0`: PRINT BOTH and make me confirm them before broadcasting.
+   `initialize` cannot be undone.
+
+4. VALIDATE LOCALLY, SIMULATE ON CHAIN, SHOW ME, THEN SEND. In that order.
+
+   const issues = validateLaunchParams(params, {
+     blockTimeCentis,                      // from the kit: kit.blockTimeCentis()
+     maxDecayBlocks, maxStartDelayBlocks,  // from the hook: they are IMMUTABLES, read them
+   })
+
+   Render every issue — errors block, warnings are "did you mean this". Then call
+   `previewSchedule(params)` and `computePoolKey(...)` on chain and show: the pool id, the
+   opening price in human units, the fee at block 0 and at the end of the window, the
+   WALL-CLOCK length of that window (use `describeLaunch(...).decayWindow`, which gives
+   "5m" rather than "3000 blocks"), and when trading opens.
+
+   The local preview and the on-chain one agreeing is itself a check: it means the block
+   time you are using matches the kit's. A dry run is the default; sending requires an
+   explicit flag.
 
 5. `maxBuyPerTx` IS PER TRANSACTION, NOT PER WALLET.
 
@@ -98,10 +126,13 @@ chain and does the whole launch in one call. I am NOT deploying the kit or the h
 
 ## Build this
 
-1. A launch form that maps to `LaunchParams` field for field, with the preset as a real
-   choice and Custom hidden behind an "advanced" toggle.
-2. A preview panel driven by `previewSchedule` — see rule 4. Nothing on it may be computed
-   off chain if the contract will answer for it.
+1. A launch form that maps to `LaunchParams` field for field — build the struct with
+   `buildLaunchParams`, never as an object literal — with the preset as a real choice from
+   `PRESET_NAMES` and Custom hidden behind an "advanced" toggle. Show each preset's
+   `doesNotProtectAgainst` string next to its name; a preset is a price, not a promise.
+2. A preview panel driven by `previewSchedule` plus `describeLaunch` — see rule 4. Nothing
+   on it may be computed off chain if the contract will answer for it, and the two must be
+   shown side by side rather than one silently preferred.
 3. The `createLaunch` transaction, with the ERC-20 approvals the seed requires, and clear
    handling of the refund path (the kit refunds unused seed amounts).
 4. A launch dashboard reading `getLaunchRecord(poolId)` and the guard's live fee, so a

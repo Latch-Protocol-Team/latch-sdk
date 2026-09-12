@@ -64,6 +64,12 @@ my target chain. I am NOT deploying core contracts.
    The SDK's address book carries `decimals` per token; `decimals()` on the live contract
    is the proof.
 
+   If you open a pool, do NOT compute `sqrtPriceX96` yourself. The SDK ships
+   `sqrtPriceX96FromPrice({ price, decimals0, decimals1 })` and `sqrtPriceForLaunch(...)`,
+   which take the decimals as required arguments and compute in bigint throughout. A
+   `Math.sqrt` anywhere near a price is a bug: a double carries ~15 significant digits and
+   this value needs up to 49.
+
 3. VERIFY EVERY ADDRESS BY A CALL, NOT BY getCode.
 
    Bytecode existing proves something is there, not that it is what you think. Identify

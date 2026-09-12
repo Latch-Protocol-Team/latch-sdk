@@ -19,6 +19,12 @@ import {
 
 export * from "./generated/abi.js";
 
+/* The pieces `LaunchpadKit` assumes a caller has. `sqrtPriceForLaunch` is
+   named in the contract's own docstring; before this it did not exist. */
+export * from "./price.js";
+export * from "./presets.js";
+export * from "./params.js";
+
 /** Launchpad ABIs re-exported under short names, matching `events`' `EventAbis`. */
 export const LaunchpadAbis = {
   LaunchpadKit: LAUNCHPAD_KIT_ABI,

@@ -40,6 +40,75 @@ You can build a hook, an indexer or a front end on this SDK under MIT terms. Dep
 
 ---
 
+## Launching a token
+
+`LaunchpadKit.createLaunch` does the whole launch in one transaction — pool, anti-sniper fee
+schedule, seeded liquidity, registry listing. The SDK ships the three things that call needs
+and that are dangerous to hand-roll.
+
+```ts
+import {
+  sqrtPriceForLaunch, buildLaunchParams, validateLaunchParams, describeLaunch,
+  getDeployment, requireContract, PRESET,
+} from "@latchprotocol/sdk"
+
+const d = getDeployment(4663)
+const kit = requireContract(d, "launchpadKit")
+
+// 1. The price. Handles address sorting AND decimals — both are silent traps.
+const price = sqrtPriceForLaunch({
+  launchToken: myToken,
+  quoteToken: usdg.address,
+  launchDecimals: 18,
+  quoteDecimals: 6,              // NOT 18. Read it off the contract.
+  quotePerLaunchToken: "0.05",   // a STRING; floats lose the digits that matter
+})
+console.log(price.poolPrice, price.launchTokenIsCurrency0)  // check before you sign
+
+// 2. The params. `preset` has no default, on purpose.
+const params = buildLaunchParams({
+  launchToken: myToken, quoteToken: usdg.address,
+  tickSpacing: 60, sqrtPriceX96: price.sqrtPriceX96,
+  preset: "FairLaunch", seed, startDelaySeconds: 3600,
+})
+
+// 3. Every objection, before a wallet is opened. blockTimeCentis comes off the kit.
+const issues = validateLaunchParams(params, { blockTimeCentis, maxDecayBlocks, maxStartDelayBlocks })
+console.log(describeLaunch(params, { blockTimeCentis }).decayWindow)   // "5m", not "3000 blocks"
+```
+
+### Three traps these close
+
+**`sqrtPriceX96` is a ratio of RAW units.** USDG is 6 decimals and WETH is 18, so a price
+computed as though both were 18 is wrong by 10¹² — a pool opened at a million times the
+intended price, fixed permanently at `initialize`. `sqrtPriceForLaunch` takes the decimals as
+required arguments and computes in bigint throughout; nothing converts through a float.
+
+**Address sorting silently inverts a price.** `currency0` is the lower address, which has
+nothing to do with which token you think of as the price. If your launch token sorts second
+the pool holds the reciprocal. The returned `launchTokenIsCurrency0` and `poolPrice` are there
+to be shown to a human before broadcasting.
+
+**`Preset.Custom` is the zero value.** An unset field, a `?? 0`, a struct built from `{}` — all
+of them mean Custom, and Custom then reads a fee schedule the caller never filled in. The chain
+accepts it. You get a launch with no anti-sniper protection and no error anywhere.
+`buildLaunchParams` refuses Custom without a schedule, and `validateLaunchParams` reports an
+all-zero Custom as an error rather than a default.
+
+### What is deliberately not here
+
+`MAX_DECAY_BLOCKS` and `MAX_START_DELAY` are immutables set per deployment from the chain's
+real block time — read them off the hook and pass them in. Hardcoding them is the twelve-second
+assumption that made them immutable in the first place. Likewise `blockTimeCentis`: read it
+from the kit. Robinhood's is `10` (0.10s per block), and on a chain that fast a duration
+written for 12-second blocks is off by more than two orders of magnitude.
+
+`PRESET_PARAMS` mirrors the Solidity so a UI can render a schedule without an RPC call, and a
+test reads `LaunchPresets.sol` and asserts every field. The chain is still the authority:
+call `previewSchedule` on the deployed kit before you broadcast.
+
+---
+
 ## Integrating with an agent
 
 Two prompts written to be pasted whole into Claude Code (or any coding agent), in the repo

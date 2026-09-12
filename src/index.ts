@@ -94,6 +94,57 @@ export {
   LAUNCHPAD_KIT_ABI,
   LAUNCH_GUARD_HOOK_ABI,
 } from "./launchpad/index.js";
+/* Price, presets and parameter validation. `sqrtPriceForLaunch` is the
+   function `LaunchParams.sqrtPriceX96`'s own docstring tells integrators to
+   use — it was named by the contract before it existed here, which left the
+   one parameter that is PERMANENT at `initialize` to hand-rolled Q64.96
+   arithmetic. Shipping it in the first release rather than after somebody
+   opens a pool at 10^12 times the intended price. */
+export {
+  LAUNCH_GUARD_LIMITS,
+  MAX_SQRT_RATIO,
+  MIN_SQRT_RATIO,
+  PRESET,
+  PRESET_NAMES,
+  PRESET_PARAMS,
+  Q96,
+  Q192,
+  assertLaunchParams,
+  bigintSqrt,
+  blocksToSeconds,
+  buildLaunchParams,
+  describeLaunch,
+  formatPips,
+  humanDuration,
+  launchParamsToTuple,
+  parseDecimal,
+  parsePreset,
+  presetName,
+  priceFromSqrtPriceX96,
+  secondsToBlocks,
+  sqrtPriceForLaunch,
+  sqrtPriceX96FromPrice,
+  sqrtPriceX96FromRatio,
+  validateLaunchParams,
+  InvalidPriceError,
+  PriceOutOfRangeError,
+} from "./launchpad/index.js";
+export type {
+  HookListingParams,
+  LatchMetadataInput,
+  LaunchIssue,
+  LaunchLimits,
+  LaunchParams,
+  LaunchPrice,
+  LaunchPriceInput,
+  LaunchSummary,
+  PresetName,
+  PresetParams,
+  PresetValue,
+  PriceInput,
+  Rational,
+  SeedParams,
+} from "./launchpad/index.js";
 
 // --- indexer model ---------------------------------------------------------
 export * as indexer from "./indexer/index.js";
