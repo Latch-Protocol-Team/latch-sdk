@@ -126,9 +126,12 @@ export interface LaunchLimits {
    * Robinhood's kit is 10; a 12-second chain is 1200.
    */
   readonly blockTimeCentis: number;
-  /** From the hook's `MAX_DECAY_BLOCKS()`. An immutable, per deployment. */
+  /**
+   * From `LaunchGuardHook.MAX_DECAY_BLOCKS()` — SCREAMING_SNAKE on chain, and
+   * there is no camelCase alias. A probe for `maxDecayBlocks()` reverts.
+   */
   readonly maxDecayBlocks?: bigint;
-  /** From the hook's `MAX_START_DELAY()`. An immutable, per deployment. */
+  /** From `LaunchGuardHook.MAX_START_DELAY()`. Same naming caveat. */
   readonly maxStartDelayBlocks?: bigint;
 }
 

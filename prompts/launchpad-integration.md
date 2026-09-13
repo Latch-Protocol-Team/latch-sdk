@@ -93,9 +93,15 @@ chain and does the whole launch in one call. I am NOT deploying the kit or the h
 4. VALIDATE LOCALLY, SIMULATE ON CHAIN, SHOW ME, THEN SEND. In that order.
 
    const issues = validateLaunchParams(params, {
-     blockTimeCentis,                      // from the kit: kit.blockTimeCentis()
-     maxDecayBlocks, maxStartDelayBlocks,  // from the hook: they are IMMUTABLES, read them
+     blockTimeCentis,        // kit.blockTimeCentis()
+     maxDecayBlocks,         // hook.MAX_DECAY_BLOCKS()   <- SCREAMING_SNAKE on chain
+     maxStartDelayBlocks,    // hook.MAX_START_DELAY()    <- and no camelCase alias
    })
+
+   Those two are Solidity `public immutable`, so their getters keep the
+   constant's own casing. `maxDecayBlocks()` does not exist and a probe for it
+   reverts. The SDK's option names are camelCase because they are TypeScript;
+   the CALLS are not.
 
    Render every issue — errors block, warnings are "did you mean this". Then call
    `previewSchedule(params)` and `computePoolKey(...)` on chain and show: the pool id, the

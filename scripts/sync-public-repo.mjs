@@ -143,6 +143,21 @@ if (!DRY) {
   }
   pkg.scripts.build = 'tsc -p tsconfig.build.json'
   pkg.scripts.prepublishOnly = 'npm run build'
+  /* `prepare`, and it is NOT redundant with `prepublishOnly`.
+
+     npm runs `prepare` when a package is installed FROM GIT; it runs
+     `prepublishOnly` only on `npm publish`. `dist/` is gitignored and `files`
+     excludes `src`, so without this a
+     `npm install github:Latch-Protocol-Team/latch-sdk` produced a package with
+     neither a build nor sources — no entry point at all, `main` pointing at a
+     directory that was never created. Reported by an integrator on 2026-09-13.
+
+     Safe here in a way it would not be in the monorepo: this `build` is a bare
+     `tsc`, because the ABI generators are stripped above. The monorepo's build
+     runs those generators against Foundry artifacts in ../core, so a `prepare`
+     there would fire on every `npm install` and fail for anyone who has not run
+     `forge build`. */
+  pkg.scripts.prepare = 'npm run build'
   pkg.repository = { type: 'git', url: 'git+https://github.com/Latch-Protocol-Team/latch-sdk.git' }
   pkg.bugs = { url: 'https://github.com/Latch-Protocol-Team/latch-sdk/issues' }
   pkg.homepage = 'https://latch.guru'
