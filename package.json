@@ -49,6 +49,11 @@
       "import": "./dist/launchpad/index.js",
       "default": "./dist/launchpad/index.js"
     },
+    "./trading": {
+      "types": "./dist/trading/index.d.ts",
+      "import": "./dist/trading/index.js",
+      "default": "./dist/trading/index.js"
+    },
     "./schema.graphql": "./schema.graphql",
     "./package.json": "./package.json"
   },

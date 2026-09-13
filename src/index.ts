@@ -146,6 +146,26 @@ export type {
   SeedParams,
 } from "./launchpad/index.js";
 
+// --- trading: router, quoter, position manager ------------------------------
+/* The three contracts a DEX front end calls. The address book named them long
+   before the SDK could encode a call to any of them, which left integrators
+   pasting interfaces out of a block explorer — a snapshot with no provenance,
+   no failure when a signature changes, and a decode that returns a plausible
+   number rather than an error. */
+export * as trading from "./trading/index.js";
+export {
+  CL_POSITION_MANAGER_ABI,
+  CL_QUOTER_ABI,
+  UNIVERSAL_ROUTER_ABI,
+  TradingAbis,
+  applySlippage,
+  applySlippageToInput,
+  quoteExactInputSingle,
+  quoteExactOutputSingle,
+  zeroForOne,
+} from "./trading/index.js";
+export type { QuoteExactSingleParams } from "./trading/index.js";
+
 // --- indexer model ---------------------------------------------------------
 export * as indexer from "./indexer/index.js";
 

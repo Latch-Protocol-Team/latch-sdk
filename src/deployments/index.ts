@@ -194,10 +194,16 @@ export interface LatchDeployment {
   /* -- fees --------------------------------------------------------------- */
 
   /**
-   * `LatchProtocolFeeController` — the contract governance points a pool
-   * manager at. Deployed does NOT mean wired: read
-   * `poolManager.protocolFeeController()` to find out whether it is in force,
-   * and expect `address(0)`.
+   * The contract governance points a pool manager at. Deployed does NOT mean
+   * wired: read `poolManager.protocolFeeController()` to find out whether it is
+   * in force, and expect `address(0)`.
+   *
+   * On Robinhood this is `LatchProtocolFeeControllerV2`, in force on both
+   * managers since 2026-09-13. V1 (`0x2a03E6E6…154c`) is RETIRED and must not
+   * be pointed at again: it priced pools correctly and had no function that
+   * could call `collectProtocolFees`, so everything it charged accrued where
+   * nobody could withdraw it. Nothing was lost — the caller check runs at
+   * collection time, so V2 can sweep what built up under V1.
    */
   readonly feeController: Address;
   /**
@@ -324,7 +330,9 @@ export const LATCH_DEPLOYMENTS: Readonly<Record<LatchChainId, LatchDeployment>> 
     clPoolManagerOwner: "0x5D7111d6c624e9a08aE63d342E4baE5878989a67",
     binPoolManagerOwner: "0x98920e33313257Ffd942f94379A7ced216462665",
 
-    feeController: "0x2a03E6E6900b9cF93CcC27e3A75a5a95FB4a154c",
+    /* V2, wired to both managers 2026-09-13. Takes 25% of the total swap fee
+       (999 pips on a 0.30% pool) and, unlike V1, can actually collect it. */
+    feeController: "0x9c2c09EFBDb1726d3563B3f92F9912C9134f54aB",
     clProtocolFeeController: "0xb1cC5BDBADD19a2430131EaE332afD72fF6be64B",
     binProtocolFeeController: "0x320feB54e940741AeB037E3944F2C95afAEE84af",
 
