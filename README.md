@@ -129,10 +129,17 @@ Fill in the four-line `## My setup` block at the top of the prompt before you se
 ## Install
 
 ```bash
-npm install @latchprotocol/sdk
-# or
-pnpm add @latchprotocol/sdk
+# Not published to npm yet — this 404s today:
+#   npm install @latchprotocol/sdk
+# Install from git until it is:
+npm install github:Latch-Protocol-Team/latch-sdk
 ```
+
+The git install builds itself via `prepare`, so you get a compiled `dist/`.
+(It did not, until 2026-09-13: this package had `prepublishOnly` and no
+`prepare`, and npm only runs the former on `npm publish` — so a git install
+produced a package with neither a build nor sources. Reported by an integrator,
+fixed, and verified by installing from a clean directory.)
 
 `viem` is the only runtime dependency (used for `Address`/`Hex` types, ABI encoding and `keccak256`).
 

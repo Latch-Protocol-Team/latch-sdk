@@ -38,14 +38,17 @@ my target chain. I am NOT deploying core contracts.
 
 - Chain: Robinhood Chain (4663)          <-- change if different
 - Quote token: USDG                       <-- the token users price against
-- My fee wallet: 0x0000000000000000000000000000000000000000   <-- REPLACE
+- My fee wallet: 0x0000000000000000000000000000000000000000   <-- REPLACE. Not
+  optional: a zero recipient does not revert, it BURNS whatever it is paid.
+  Refuse to wire it and ask me for a real address.
 - Router: use Latch's UniversalRouter     <-- or "deploy my own", see below
 
 ## Ground rules — follow these exactly, they are not stylistic
 
 1. ADDRESSES COME FROM THE SDK, NEVER FROM ME AND NEVER FROM MEMORY.
 
-   npm install @latchprotocol/sdk viem
+   # NOT ON npm YET — `npm install @latchprotocol/sdk` returns 404. Install from git:
+   npm install github:Latch-Protocol-Team/latch-sdk viem
 
    import { getDeployment, requireContract, latchTransport } from "@latchprotocol/sdk"
    const d = getDeployment(4663)
@@ -70,20 +73,31 @@ my target chain. I am NOT deploying core contracts.
    `Math.sqrt` anywhere near a price is a bug: a double carries ~15 significant digits and
    this value needs up to 49.
 
-3. VERIFY EVERY ADDRESS BY A CALL, NOT BY getCode.
+3. NAMES COME FROM THE ABI, NOT FROM THIS PROMPT.
+
+   Where this file names a contract function, treat it as a hint and confirm the
+   selector against the ABI the SDK ships. Solidity `public constant` and
+   `public immutable` getters keep the constant's own casing, so the real names
+   are often SCREAMING_SNAKE where prose would write camelCase —
+   `MAX_DECAY_BLOCKS()`, not `maxDecayBlocks()`. An integrator's probe reverted
+   on exactly that in this prompt's launchpad sibling. A wrong name reverts,
+   which is the good case; the bad case is a name that exists on a DIFFERENT
+   contract and answers.
+
+4. VERIFY EVERY ADDRESS BY A CALL, NOT BY getCode.
 
    Bytecode existing proves something is there, not that it is what you think. Identify
    each contract by a function only it answers — e.g. the registry answers `latchCount()`
    while a retired one answers `hookCount()` and still returns a plausible number.
 
-4. NEVER RENDER A NUMBER YOU DID NOT READ.
+5. NEVER RENDER A NUMBER YOU DID NOT READ.
 
    No mock modules, no sample series, no placeholder price. Four visually distinct states
    for every panel: loading, error, empty, not-configured. On error, say the chain is
    unreachable — never fall back to an example. Two swaps do not make a chart; say "2
    swaps since block N" instead of drawing a line through them.
 
-5. IF A POOL USES RevShareHook, READ `getPendingConfig` BESIDE `getConfig`.
+6. IF A POOL USES RevShareHook, READ `getPendingConfig` BESIDE `getConfig`.
 
    A pool can show fee 0 / disabled while an armed proposal sits ready for anyone to apply
    in the block before a large swap. A screen showing only the live config is telling a

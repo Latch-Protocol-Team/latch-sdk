@@ -233,7 +233,21 @@ export interface LatchDeployment {
   /* -- directory ---------------------------------------------------------- */
 
   /**
-   * `LatchRegistry` — the Latch Marketplace's backing contract.
+   * `LatchRegistry` — the HOOK registry, and the Latch Marketplace's backing
+   * contract. This is the one `LaunchpadKit.registry()` returns and the one
+   * `listHook` writes to.
+   *
+   * NOT `launchRegistry`. There are two registries, the names are one word
+   * apart, and both are real and deployed — an integrator wired to the wrong
+   * one on 2026-09-13 and only caught it by probing. Tell them apart by a CALL,
+   * never by the name or the position in this file:
+   *
+   *   LatchRegistry        latchCount() answers, MAX_NAME_BYTES() answers 64
+   *   LatchLaunchRegistry  latchCount() REVERTS, launchCount() answers
+   *
+   * This one also owns the governance surface: `LatchLaunchRegistry` reads
+   * `CURATOR_ROLE` and `GUARDIAN_ROLE` from here rather than defining its own,
+   * so a curator granted here can flag launches too.
    *
    * REDEPLOYABLE, and its stale failure mode is silent: a retired registry
    * answers `latchCount()` with a number and renders as a healthy, empty
@@ -274,9 +288,24 @@ export interface LatchDeployment {
   /* -- launchpad: not deployed anywhere yet -------------------------------- */
 
   /**
-   * `LatchLaunchRegistry`, `LaunchpadKit` and the `LaunchGuardHook` a launch
-   * pool attaches. All three are `null` on every chain today — they are coming,
-   * and until they land the honest answer is "not configured", not an address.
+   * `LatchLaunchRegistry` — the LAUNCH registry. A different contract from
+   * `registry` above, deployed and live on Robinhood since 2026-09-11.
+   *
+   * (This doc used to say all three launchpad contracts were `null` on every
+   * chain and "coming". They landed; the comment did not follow. If you are
+   * reading a claim about what is deployed, check the table below instead.)
+   *
+   * Holds `registerLaunch` / `getLaunch(poolId)` / `launchCount()` and the
+   * launchpad directory `registerLaunchpad` / `getLaunchpad`. It reads its
+   * roles from `registry`, so it has no ownership row of its own.
+   *
+   * WHICH ONE DO I WANT?
+   *   listing a HOOK ......... `registry`  (this is what the kit uses)
+   *   a launch's own record ... `LaunchpadKit.getLaunchRecord(poolId)`
+   *   the curated launch/launchpad directory ... this contract
+   *
+   * `latchCount()` reverts here. That is the cheapest way to prove which of the
+   * two you are holding.
    */
   readonly launchRegistry: Address | null;
   readonly launchpadKit: Address | null;
