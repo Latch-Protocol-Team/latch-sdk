@@ -75,6 +75,26 @@
    the proof, and anything pricing a pool should read it — `npm run latch:verify`
    in the scaffolded app does exactly that for every address and token here.
 
+   ADDING A CHAIN IS A DATA CHANGE, NOT A CODE CHANGE
+   --------------------------------------------------
+   One object literal in `DEPLOYMENTS_TABLE` below is the whole edit. Nothing
+   restates the chain list: `LatchChainId`, `LatchChainKey`, `LATCH_CHAIN_IDS`,
+   `LATCH_MAINNET_CHAIN_IDS`, `NATIVE_CURRENCY` and `isLatchChainId` are all
+   DERIVED from that table's keys. It was not always so — until 2026-09-20 the
+   two chains were restated five times, and a third chain meant editing a union
+   type, an array, a map and a function body, any one of which could be missed
+   while the other four compiled fine.
+
+   What the compiler still enforces, and should: every field typed `Address`
+   (not `Address | null`) must be present. A chain is not addable half-way.
+   `vault`, `clPoolManager`, `binPoolManager`, `feeController`, `registry`,
+   `universalRouter`, both position managers, both quoters, the descriptor,
+   `create3Factory`, `permit2`, `weth`, `revShareHook`, both timelocks and
+   `deployedAtBlock` are all required, because a consumer branching on `null`
+   for those was never written. So a new chain enters this table when its core
+   is deployed and read back, and not one commit earlier. There is no
+   placeholder to pre-stage and no zero address to fill in.
+
    ARC MAINNET (5042) IS DELIBERATELY ABSENT
    -----------------------------------------
    It has never answered a probe from this project: TLS handshake failures on
@@ -86,12 +106,24 @@
    ============================================================================ */
 
 import type { Address } from "viem";
+import { SAFE_CONTRACTS, type SafeContracts } from "./safe.js";
 
-/** Chains where Latch's shared core is deployed and verified. */
-export type LatchChainId = 4663 | 11155111;
+import type { ContractBlockClock } from "../chains/clock.js";
 
-/** Stable key per chain. Matches the keys in `chains/endpoints.ts`. */
-export type LatchChainKey = "robinhood" | "sepolia";
+/**
+ * Chains where Latch's shared core is deployed and verified.
+ *
+ * DERIVED from `DEPLOYMENTS_TABLE`'s keys — do not write a union here. Adding a
+ * chain is one object literal in that table and nothing else.
+ */
+export type LatchChainId = keyof typeof DEPLOYMENTS_TABLE;
+
+/**
+ * Stable key per chain. Matches the keys in `chains/endpoints.ts`.
+ *
+ * Also derived: it is the union of the table's own `key` fields.
+ */
+export type LatchChainKey = (typeof DEPLOYMENTS_TABLE)[LatchChainId]["key"];
 
 /**
  * A token this address book knows about, with the decimals that make its
@@ -110,6 +142,68 @@ export interface TokenInfo {
    * without saying so is how a testnet balance reads as money.
    */
   readonly isTestToken: boolean;
+  /**
+   * A tokenised stock: an issuer-controlled security token. Present only when
+   * true. What it means for a pool or a launch quoted in it (read on chain,
+   * 2026-09-13, Robinhood tokens): the issuer can pause transfers, burn from
+   * any holder and upgrade every stock token at once, and raw units differ
+   * from shares by a UI multiplier. A UI must say so beside any stock pair.
+   */
+  readonly stock?: {
+    /** The issuer as it names itself on the token, e.g. "Robinhood". */
+    readonly issuer: string;
+    /** Exchange ticker of the underlying, e.g. "NVDA". */
+    readonly ticker: string;
+  };
+}
+
+/* ============================================================================
+   DURATION CLOCKS — how a deployed Latch contract measures time.
+
+   DECIDED 2026-09-13 (Option B): every duration in Latch contracts moves to
+   `block.timestamp`. The contracts already on chain were built earlier and
+   measure in `block.number`, which on Arbitrum Nitro (Robinhood, 4663) is the
+   PARENT chain's block, not the L2 block the RPC reports. Both kinds are live at
+   once, and the old ones do not go away when the address book moves on: a pool
+   is bound to its hook's address forever.
+
+   So the clock is recorded HERE, per contract, and no consumer infers it:
+
+     "timestamp"       stored times are unix seconds; compare with
+                       `block.timestamp` (the latest block's `timestamp`).
+     "contract-block"  stored times are the EVM's `block.number`; compare with
+                       `readContractBlockNumber` from `chains/clock`, NEVER with
+                       `eth_blockNumber`.
+
+   There is no decode-time test that tells the two apart. `RevShareHook`'s
+   8-word `getPendingConfig` has the same layout in both the block-numbered
+   `0xfC00…` and the timestamp source, and `LaunchGuardHook`'s `Launch` struct
+   lines up word for word. The wrong reading returns a 1970 date or a far-future
+   block, not an error. Look the address up; never guess.
+   ============================================================================ */
+
+/** How a contract measures and stores durations. See the block above. */
+export type DurationClock = "timestamp" | "contract-block";
+
+/**
+ * The on-chain layout of `RevShareHook.getPendingConfig(poolId)`.
+ *
+ * - `block-no-expiry` — 7 words, `(uint48 effectiveBlock, ConfigParams)`. No
+ *   expiry at all: a matured proposal stays armed until cancelled or frozen.
+ * - `block-with-expiry` — 8 words, `(uint48 effectiveBlock, uint48 expiryBlock, ConfigParams)`.
+ * - `timestamp-with-expiry` — 8 words, `(uint40 effectiveAt, uint40 expiresAt, ConfigParams)`.
+ */
+export type RevSharePendingShape = "block-no-expiry" | "block-with-expiry" | "timestamp-with-expiry";
+
+/** One `RevShareHook` this address book knows, current or retired, with its shape. */
+export interface RevShareHookRecord {
+  readonly address: Address;
+  readonly durationClock: DurationClock;
+  readonly pendingShape: RevSharePendingShape;
+  /** `current` is the one `LatchDeployment.revShareHook` names. Exactly one per chain. */
+  readonly status: "current" | "retired";
+  /** Why it is here. Pools bound to a retired hook still exist and still trade. */
+  readonly note: string;
 }
 
 export interface NativeCurrency {
@@ -139,6 +233,52 @@ export interface ReferencePool {
 }
 
 /**
+ * The contracts `LaunchpadKitV2` is built from, in the deployment order of
+ * `packages/launchpad/docs/kit-v2-integration.md` section 11.12.
+ *
+ * A separate group rather than new top-level fields: none of these replaces the
+ * block-numbered `launchpadKit` / `launchGuardHook` above, which keep hosting
+ * their pools, and a kit is only usable when the whole group is present and
+ * bound together (its constructor asserts the hooks' factory, the lockers'
+ * position managers and recipient). Each slot is `null` until that contract is
+ * deployed AND verified; a partially filled group is an in-progress deployment,
+ * not a usable kit - `requireLaunchpadV2` refuses it.
+ *
+ * All durations in this stack are `block.timestamp` (Option B), so the group
+ * carries no clock field.
+ */
+export interface LaunchpadV2Deployment {
+  /** `LaunchpadKitV2`. Owner = the governance Safe; its only power is the launch fee. */
+  readonly launchpadKitV2: Address | null;
+  /** `LaunchLegs`, the linked library the kit DELEGATECALLs. Verified alongside the kit. */
+  readonly launchLegs: Address | null;
+  /** `LaunchTokenFactory`. Its `launchTokenInitCodeHash()` feeds off-chain address prediction. */
+  readonly launchTokenFactory: Address | null;
+  /** `LatchLPLocker` (CL). No owner. */
+  readonly clLPLocker: Address | null;
+  /** `LatchBinLPLocker`. No owner. */
+  readonly binLPLocker: Address | null;
+  /** The timestamp `LaunchGuardHook` bound to `launchTokenFactory`. Not the block-numbered `launchGuardHook`. */
+  readonly clLaunchGuardHook: Address | null;
+  /** `BinLaunchGuardHook(binPoolManager, launchTokenFactory)`. */
+  readonly binLaunchGuardHook: Address | null;
+  /** `LatchPadFactory`, bound to `launchpadKitV2`. No owner. */
+  readonly padFactory: Address | null;
+}
+
+/** The not-deployed value of {@link LaunchpadV2Deployment}. */
+const LAUNCHPAD_V2_NOT_DEPLOYED: LaunchpadV2Deployment = {
+  launchpadKitV2: null,
+  launchLegs: null,
+  launchTokenFactory: null,
+  clLPLocker: null,
+  binLPLocker: null,
+  clLaunchGuardHook: null,
+  binLaunchGuardHook: null,
+  padFactory: null,
+};
+
+/**
  * Every Latch contract on one chain.
  *
  * Field-by-field nullability is deliberate and load-bearing. A field typed
@@ -165,6 +305,25 @@ export interface LatchDeployment {
    */
   readonly deployedAtBlock: bigint;
   readonly nativeCurrency: NativeCurrency;
+
+  /* -- clocks ------------------------------------------------------------- */
+
+  /**
+   * Which clock `block.number` follows INSIDE THE EVM on this chain.
+   *
+   * `"parent-l1"` on Arbitrum Nitro chains, where a contract sees Ethereum's
+   * block number while `eth_blockNumber` (and `deployedAtBlock` above) is the L2
+   * one. Every block number a Latch contract STORES is on this clock. Compare
+   * those against `readContractBlockNumber` from `chains/clock`, never against
+   * `getBlockNumber()`. See the header of `chains/clock.ts`.
+   */
+  readonly contractBlockClock: ContractBlockClock;
+  /**
+   * Real cadence of the contract-visible `block.number`, in hundredths of a
+   * second. NOT the RPC's block time, and NOT whatever a contract declared in
+   * its own `blockTimeCentis()` — those can be wrong, and on Robinhood they are.
+   */
+  readonly contractBlockTimeCentis: number;
 
   /* -- settlement core ---------------------------------------------------- */
 
@@ -229,6 +388,12 @@ export interface LatchDeployment {
   readonly timelockCustody: Address;
   /** 6h tier. Fee policy, descriptor, router — reversible ones. */
   readonly timelockPolicy: Address;
+  /**
+   * The canonical Safe v1.4.1 contracts on this chain (`deployments/safe.ts`):
+   * what the governance Safe is a proxy of, and the `MultiSendCallOnly` a
+   * batch DELEGATECALLs. Verified by `eth_getCode` per chain before listing.
+   */
+  readonly safe: SafeContracts;
 
   /* -- directory ---------------------------------------------------------- */
 
@@ -258,6 +423,25 @@ export interface LatchDeployment {
   /* -- periphery and router ----------------------------------------------- */
 
   readonly universalRouter: Address;
+  /**
+   * `LatchFillRouter` — the routed-fill router that may fill a trade on a THIRD-PARTY AMM and
+   * charges 10 bps for it, while a Latch pool is charged exactly 0 (owner decision 2026-09-20).
+   *
+   * `null` where it is not deployed, which is the house convention and NOT `?:` — `requireContract`
+   * tests for `null`, so an optional member would be invisible to it and would produce viem's
+   * "invalid address" instead of this file's "not deployed on <chain>" message. The absence is
+   * meaningful: a caller that reads `null` as "route through Latch pools only" is behaving
+   * correctly.
+   *
+   * ⚠ Never fall back to `universalRouter`. They are different contracts with different fee
+   * behaviour, and conflating them charges a Latch pool the routed fee — the exact opposite of
+   * the decision this router implements.
+   *
+   * Its `LatchFillExecutor` is deliberately not listed: it is the router's own first CREATE
+   * (nonce 1), so it is derived rather than configured, and `EXECUTOR()` on the router is the
+   * authority.
+   */
+  readonly fillRouter: Address | null;
   readonly clPositionManager: Address;
   readonly binPositionManager: Address;
   readonly clQuoter: Address;
@@ -311,6 +495,59 @@ export interface LatchDeployment {
   readonly launchpadKit: Address | null;
   readonly launchGuardHook: Address | null;
 
+  /**
+   * The `LaunchpadKitV2` stack. NOT DEPLOYED on any chain as of 2026-09-14, so
+   * every slot is `null` on every chain. See `LaunchpadV2Deployment`.
+   */
+  readonly launchpadV2: LaunchpadV2Deployment;
+
+  /**
+   * `LatchSplitFactory` (Team splits): clones a `LatchSplit` per team. Owner =
+   * the governance Safe, whose only powers are the creation fee and the
+   * protocol share for NEW splits, each inside an immutable cap. Independent of
+   * the kit, so it is not part of `launchpadV2`. `null` where not deployed.
+   */
+  readonly splitFactory: Address | null;
+
+  /**
+   * Latch utilities: lockers, multisend and Merkle airdrops. Each charges one
+   * flat native fee per action, enforced by the contract (`LatchFeeGate`: owner
+   * = the governance Safe, fee inside an immutable cap, increases behind a
+   * notice, decreases immediate, flushed permissionlessly to the Safe). A caller
+   * through the SDK pays exactly what any other caller pays. `null` where not
+   * deployed.
+   *
+   * - `positionLock`: `LatchPositionLock`, time-locks a CLPositionManager NFT
+   *   (bound to one position manager, read `positionManager()` from it).
+   * - `tokenLock`: `LatchTokenLock`, ERC-20 / native time-locks and vesting.
+   * - `multisend`: `LatchMultisend`, one call to up to 1,000 recipients.
+   * - `dropFactory`: `LatchDropFactory`, clones and funds a `LatchMerkleDrop`.
+   */
+  readonly positionLock: Address | null;
+  readonly tokenLock: Address | null;
+  readonly multisend: Address | null;
+  readonly dropFactory: Address | null;
+
+  /* -- duration clocks ----------------------------------------------------- */
+
+  /**
+   * How each redeployable time-bounded contract in THIS record measures time.
+   * `null` exactly where the contract itself is `null`. Consumers branch on this
+   * — the landing preset curve, the dapp proposal banner, the keeper — and it
+   * moves in the same edit as the address it describes.
+   */
+  readonly durationClocks: {
+    readonly revShareHook: DurationClock;
+    readonly launchpadKit: DurationClock | null;
+    readonly launchGuardHook: DurationClock | null;
+  };
+  /**
+   * Every `RevShareHook` a surface may meet on this chain: the current one and
+   * each retired one that still hosts pools. Look a hook up with
+   * `revShareHookRecord`; an address not listed here has an UNKNOWN shape.
+   */
+  readonly revShareHooks: readonly RevShareHookRecord[];
+
   /* -- tokens and reference pool ------------------------------------------ */
 
   /**
@@ -332,7 +569,14 @@ export interface LatchDeployment {
    the scaffolded tenant app, the keeper, any integrator — reads through this.
    ============================================================================ */
 
-export const LATCH_DEPLOYMENTS: Readonly<Record<LatchChainId, LatchDeployment>> = {
+/*
+ * The table itself, unannotated and `as const` so its KEYS and its `key` fields
+ * are literal types the chain-id and chain-key unions above are read off. The
+ * shape check happens once, on the annotated `LATCH_DEPLOYMENTS` below: a field
+ * of the wrong type, or a missing required address, is an error there and
+ * points at the offending line here.
+ */
+const DEPLOYMENTS_TABLE = {
   /* --------------------------------------------------------------------------
      Robinhood Chain — the FIRST MAINNET. Deployed 2026-09-11; all eighteen
      contracts verified on Sourcify (Blockscout's own endpoint 403s behind
@@ -353,6 +597,15 @@ export const LATCH_DEPLOYMENTS: Readonly<Record<LatchChainId, LatchDeployment>> 
     deployedAtBlock: 60111836n,
     nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
 
+    /* Arbitrum Nitro. Measured 2026-09-13: eth_call NUMBER 25,972,228 while
+       eth_blockNumber read 62,397,593; the latest header's l1BlockNumber matched
+       NUMBER, and over 3,428 s of headers NUMBER advanced 283 (12.1 s each).
+       Mined-state proof: ERC20Votes 0x1eae…8888 checkpointed L2 block
+       62,356,430 at key 25,971,883, that block's l1BlockNumber. The RPC's own
+       0.102 s blocks are the LOG clock only. */
+    contractBlockClock: "parent-l1",
+    contractBlockTimeCentis: 1200,
+
     vault: "0x78e8359c6D34Df797b8A793dE8c7c6bffA97fB6c",
     clPoolManager: "0xf4A28fA4CFeCAEf349A7D52fA1eB4dF56EB22F66",
     binPoolManager: "0x1bB57b3A59b69f128700Ff59cC6EE22835aE6979",
@@ -365,7 +618,12 @@ export const LATCH_DEPLOYMENTS: Readonly<Record<LatchChainId, LatchDeployment>> 
     clProtocolFeeController: "0xb1cC5BDBADD19a2430131EaE332afD72fF6be64B",
     binProtocolFeeController: "0x320feB54e940741AeB037E3944F2C95afAEE84af",
 
+    /* The 2-of-3 Safe SUPERSEDED by the 3-of-4 `0xeA7903Ed…a038` on 2026-09-24. It stays here
+       because this field records who governs 4663 TODAY, and that is still this address: the new
+       Safe is not deployed on Robinhood, and none of the live contracts have been transferred.
+       New chains get the new Safe; this line changes only when the transfers are executed. */
     governanceSafe: "0x715a6176946aDbD22c1B2021d321Fb3767ca3432",
+    safe: SAFE_CONTRACTS[4663]!,
         /* REDEPLOYED 2026-09-12, all six Sourcify-verified. The addresses above
        these are the originals and are retired, NOT dead: a retired
        LatchRegistry still answers latchCount() and renders as a healthy empty
@@ -379,6 +637,12 @@ timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
     registry: "0xb2c8BB7473A09b0906f192D69e30D7362fA988CC",
 
     universalRouter: "0x2220dF8ec6CABC7f2074bC1e56DA092B765f736c",
+
+    /* LatchFillRouter is not deployed on this chain yet. `null` is the deployed-state answer,
+
+       not a placeholder: callers route through Latch pools only. */
+
+    fillRouter: null,
     clPositionManager: "0x957cc13b24a563cc92253213d9d5e6954c8db6a7",
     binPositionManager: "0x990f395003c35a0ab390e10b003972407f882399",
     clQuoter: "0xdfd14247f87d1e4fc82f0f441fb43bc8aa466114",
@@ -397,12 +661,53 @@ timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
     launchRegistry: "0x6D10B4CeDb53aD50c5A1D83f27fcE9c5C3b15c94",
     launchpadKit: "0x2a4CA9809C873f9a7eb132cb073710F26D0bBcA7",
     launchGuardHook: "0x8b4F6699F1D2E1b368aDFb802D14adf4e474575c",
+    /* Kit v2 stack: built and tested, not deployed on Robinhood. */
+    launchpadV2: LAUNCHPAD_V2_NOT_DEPLOYED,
+    splitFactory: null,
+    positionLock: null,
+    tokenLock: null,
+    multisend: null,
+    dropFactory: null,
+
+    /* All three live launch/revenue contracts are the BLOCK-NUMBERED builds, and
+       all three were sized for the wrong clock (CLAUDE.md 3b): the kit and hook
+       declare 10 centis where the contract clock is 1200, so windows run ~120x
+       long. Their timestamp replacements are built and tested but NOT deployed.
+       When they are, change the address AND the clock below in the same edit. */
+    durationClocks: {
+      revShareHook: "contract-block",
+      launchpadKit: "contract-block",
+      launchGuardHook: "contract-block",
+    },
+    revShareHooks: [
+      {
+        address: "0xfC00485AFB2f9C73Bd7F9f5e72d14709233E2aD2",
+        durationClock: "contract-block",
+        pendingShape: "block-with-expiry",
+        status: "current",
+        note:
+          "432,000-block delay declared at 0.1 s; on the real ~12 s contract clock that is ~60 days, " +
+          "and its proposal TTL ~360 days. No pools.",
+      },
+      {
+        address: "0x23CE34E8199927DD270dddd8579c947542bDE446",
+        durationClock: "contract-block",
+        pendingShape: "block-no-expiry",
+        status: "retired",
+        note:
+          "Hosts the LTT1/LTT2 pool for as long as it exists. 3,600-block (~12 h) delay and NO expiry: " +
+          "a matured proposal stays armed until cancelled or frozen.",
+      },
+    ],
 
     tokens: [
       {
+        /* `name()` on this contract answers "WETH", not "Wrapped Ether" (read
+           2026-09-18 by the token-list generator's chain check, confirmed by a
+           direct eth_call). The Sepolia WETH below does say "Wrapped Ether". */
         address: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
         symbol: "WETH",
-        name: "Wrapped Ether",
+        name: "WETH",
         decimals: 18,
         isTestToken: false,
       },
@@ -415,6 +720,26 @@ timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
         name: "Global Dollar",
         decimals: 6,
         isTestToken: false,
+      },
+      /* Robinhood stock tokens, read on chain 2026-09-13: 283-byte beacon
+         proxies of `Stock` (implementation 0xb354…5aE2 on Sourcify), beacon +
+         registry 0xe10b6f6B275de231345c20D14Ab812db62151b00. Transfer freely
+         into the Vault today; the issuer keeps pause / adminBurn / upgrade. */
+      {
+        address: "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+        symbol: "NVDA",
+        name: "NVIDIA • Robinhood Token",
+        decimals: 18,
+        isTestToken: false,
+        stock: { issuer: "Robinhood", ticker: "NVDA" },
+      },
+      {
+        address: "0x4a0E65A3EcceC6dBe60AE065F2e7bb85Fae35eEa",
+        symbol: "SPCX",
+        name: "Space Exploration Technologies Corp. Class A Common Stock • Robinhood Token",
+        decimals: 18,
+        isTestToken: false,
+        stock: { issuer: "Robinhood", ticker: "SPCX" },
       },
       {
         address: "0x2A21c0826848f2D597B7C87A4B931dE1407958A6",
@@ -471,6 +796,11 @@ timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
     deployedAtBlock: 11672600n,
     nativeCurrency: { name: "Sepolia Ether", symbol: "ETH", decimals: 18 },
 
+    /* An L1: NUMBER and eth_blockNumber are the same clock (both 11,699,528
+       when probed 2026-09-13), 12 s slots. */
+    contractBlockClock: "native",
+    contractBlockTimeCentis: 1200,
+
     vault: "0xCe3d133eb486b448A53437A5073619FbE424d01B",
     clPoolManager: "0xb7C8a11E0B359616eD06256783aF57114841F738",
     binPoolManager: "0xdBA93F91BA5B8535AE2b38be6a3A6CdcfDE6f6f3",
@@ -480,12 +810,21 @@ timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
     binPoolManagerOwner: null,
 
     feeController: "0xc1b7A4e61A4B6ceBA3e308425dc2390c2CE57ea9",
+    /* V2 (0x5c43d541…) and V3 (0x19789d7f…) were DEPLOYED on 2026-09-25 but NOT
+       INSTALLED: `setProtocolFeeController` on each manager needs the core owner EOA
+       0x615C…7854, which the release session does not hold. So the managers still
+       answer V1, and these stay null because null means "what the managers actually
+       use", not "what exists". Installing them is two transactions by that key. */
     clProtocolFeeController: null,
     binProtocolFeeController: null,
 
-    /* Same Safe address as Robinhood, same owners, same threshold — but here it
-       owns nothing. Read `owner()`; do not infer authority from this line. */
-    governanceSafe: "0x715a6176946aDbD22c1B2021d321Fb3767ca3432",
+    /* The Safe OF RECORD, created on Sepolia at its canonical address on 2026-09-25
+       by replaying the exact initializer from its Base creation transaction (v1.4.1,
+       3-of-4, same owners, nonce 0). It owns every contract deployed that day. The
+       superseded 2-of-3 Safe 0x715a…3432 is still on chain here and still owns what
+       predates the redeploy; read `owner()` rather than inferring from either line. */
+    governanceSafe: "0xeA7903Ed7d5FAE93CE1500ED2c4df138bDF0a038",
+    safe: SAFE_CONTRACTS[11155111]!,
     timelockCustody: "0x35D72DbEeD5F2CE95a4DFb3917D2CD3c43e544CA",
     timelockPolicy: "0x30897C9e7c1c336cDF68C7494f930C75A355d42F",
 
@@ -494,9 +833,17 @@ timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
        `hookCount()` and still holds the original listing. Nothing reads it; it
        was retired, NOT migrated. That is the silent-stale failure mode this
        module exists to prevent. */
-    registry: "0xB504da43C6ED342a511f3e5849f53035F2C807d1",
+    /* REPLACED 2026-09-25. The 0xB504… build has no `vault()`, so
+       `DeployLaunchRegistry.s.sol` reverts against it — replacing it is required on
+       Sepolia, not optional. 0xB504… still answers and still holds its listings;
+       nothing reads it. */
+    registry: "0x1978048A2e1a896384E0540E6dbE7edC89392695",
 
     universalRouter: "0xB647CEbd5b8d6bE38C198634828187F482f4874B",
+
+    /* Deployed 2026-09-25 with the rest of the release (docs/sepolia-release-acceptance.md).
+       feeBps 10 inside an immutable maxFeeBps 50; owner is the Safe of record. */
+    fillRouter: "0x19783226d9b43e2B3fC7401AE5507d75e4A2a9bC",
     clPositionManager: "0xb3505d48A84651c104a02D41B2b9D8CB84dFEC33",
     binPositionManager: "0x965b1D98BB0cd4E0125D78AD17ea4d2D1d62AE6f",
     clQuoter: "0x4471e61fE697204908CA97CdF4810EeAf406e9C1",
@@ -514,9 +861,54 @@ timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
        reads none of them and sums `RevShareTaken` logs instead. */
     revShareHook: "0x1C86dc775FF3FDADCCF87F132de7a4eb60B6bE28",
 
-    launchRegistry: null,
+    launchRegistry: "0x19786475eFB20fB9972c8A07dBfD2Ed785E18D3C",
+    /* Kit v1 was never deployed here and never will be: v2 is the release. */
     launchpadKit: null,
-    launchGuardHook: null,
+    launchGuardHook: "0x19787323459816B6E76dF78507363269a9458197",
+    /* The whole v2 stack, deployed 2026-09-25 from the release commit and exercised
+       live (docs/sepolia-release-acceptance.md): two launches, two swaps, the creator
+       tax taken, settled and claimed. Every owner is the Safe of record. */
+    launchpadV2: {
+      launchpadKitV2: "0x1978DC12388ee2feda6cFDfD7245F543fB019cb8",
+      launchLegs: "0x1978367629505f09D16Aed93616A643E25a71550",
+      launchTokenFactory: "0x1978C70A0e59A6b52477CE34dcE050cfC3e4b4a5",
+      clLPLocker: "0x1978d33E07D2Ed2e155C3f168e3510d027c49a48",
+      binLPLocker: "0x19787f213d0988005934A2f87dbd8e5C5E7A0D5e",
+      clLaunchGuardHook: "0x19787323459816B6E76dF78507363269a9458197",
+      binLaunchGuardHook: "0x1978a3F6d11c9A6cAEa0Df547cbE54a3fa7280F7",
+      padFactory: "0x19781ed911c36E5303c972545a31736c94d18604",
+    },
+    splitFactory: "0x19789714b1FEa5DFecf0761cbAF4fd1b6fC0728D",
+    /* Latch utilities, REDEPLOYED 2026-09-25 by the RELEASE script
+       (script/DeployLatchUtilities.s.sol), not by the 2026-09-19 showcase — the rule
+       is that every release contract is deployed by its own script, and the showcase
+       is a Sepolia convenience that hard-codes the superseded Safe. Owner and fee
+       recipient: the Safe of record. TESTNET fee 0.0001 ETH per action, cap 10x,
+       1-day notice; the mainnet price is set by the mainnet deploy, not here.
+       The 2026-09-19 set (0x9D73…, 0x502d…, 0xDe2e…, 0xbB34…) is still on chain and
+       still works; nothing reads it. */
+    positionLock: "0x1979b9A756d00149F695c88C2F37f88228746Df9",
+    tokenLock: "0x1979481aAd83348B537B12a320bD3771e0836db4",
+    multisend: "0x1979F6410b204A31E4F94587768a910abd0AFAb4",
+    dropFactory: "0x197961b758267bE455c9dEb94F9525978d30b392",
+
+    durationClocks: {
+      /* 0x1C86… is the OLD block-based hook and stays the address book's
+         `revShareHook` until a consumer migrates; the 2026-09-25 redeploy
+         0x197837e5… is timestamp-based and is listed in `revShareHooks` below. */
+      revShareHook: "contract-block",
+      launchpadKit: null,
+      launchGuardHook: "timestamp",
+    },
+    revShareHooks: [
+      {
+        address: "0x1C86dc775FF3FDADCCF87F132de7a4eb60B6bE28",
+        durationClock: "contract-block",
+        pendingShape: "block-no-expiry",
+        status: "current",
+        note: "Predates proposal expiry. An L1, so the contract block clock is the RPC one (12 s).",
+      },
+    ],
 
     tokens: [
       {
@@ -555,10 +947,20 @@ timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
       tickSpacing: 60,
     },
   },
-};
+} as const;
 
-/** Every chain in the table, ascending. */
-export const LATCH_CHAIN_IDS: readonly LatchChainId[] = [4663, 11155111];
+/**
+ * Every Latch contract on every chain.
+ *
+ * This annotation is the shape check for `DEPLOYMENTS_TABLE` above: a typo, a
+ * wrong type or a missing required address fails HERE and names the field.
+ */
+export const LATCH_DEPLOYMENTS: Readonly<Record<LatchChainId, LatchDeployment>> = DEPLOYMENTS_TABLE;
+
+/** Every chain in the table, ascending. Derived — never written out by hand. */
+export const LATCH_CHAIN_IDS: readonly LatchChainId[] = (
+  Object.keys(DEPLOYMENTS_TABLE).map(Number) as LatchChainId[]
+).sort((a, b) => a - b);
 
 /**
  * The mainnets only. Iterate this, not `LATCH_CHAIN_IDS`, anywhere a testnet
@@ -582,11 +984,18 @@ export const LATCH_MAINNET_CHAIN_IDS: readonly LatchChainId[] = LATCH_CHAIN_IDS.
   (id) => LATCH_DEPLOYMENTS[id].isMainnet,
 );
 
-/** Native currency per chain, split out for callers that want only this. */
-export const NATIVE_CURRENCY: Readonly<Record<LatchChainId, NativeCurrency>> = {
-  4663: LATCH_DEPLOYMENTS[4663].nativeCurrency,
-  11155111: LATCH_DEPLOYMENTS[11155111].nativeCurrency,
-};
+/**
+ * Native currency per chain, split out for callers that want only this.
+ *
+ * Derived. Do not restate a chain here: a hand-written map is how a third chain
+ * gets a fourth-hand ETH entry with the wrong symbol on a chain whose gas token
+ * is not ether at all.
+ */
+export const NATIVE_CURRENCY: Readonly<Record<LatchChainId, NativeCurrency>> = Object.freeze(
+  Object.fromEntries(
+    LATCH_CHAIN_IDS.map((id) => [id, LATCH_DEPLOYMENTS[id].nativeCurrency] as const),
+  ) as Record<LatchChainId, NativeCurrency>,
+);
 
 /**
  * Contracts whose address is a MOVING TARGET.
@@ -620,8 +1029,12 @@ export type ContractKey = {
   [K in keyof LatchDeployment]: LatchDeployment[K] extends Address | null ? K : never;
 }[keyof LatchDeployment];
 
+/**
+ * Whether the address book knows this chain. Derived from the table's keys, so
+ * a chain added there is recognised everywhere without a second edit.
+ */
 export function isLatchChainId(chainId: number): chainId is LatchChainId {
-  return chainId === 4663 || chainId === 11155111;
+  return Object.prototype.hasOwnProperty.call(DEPLOYMENTS_TABLE, chainId);
 }
 
 /**
@@ -690,6 +1103,53 @@ export function tokenByAddress(
   return LATCH_DEPLOYMENTS[chainId].tokens.find((t) => t.address.toLowerCase() === wanted);
 }
 
+/**
+ * The record for a `RevShareHook` at `address` on `chainId`, current or retired,
+ * or `undefined` when the address book does not know it.
+ *
+ * `undefined` is a real answer. A tenant's own hook, or a hook deployed after
+ * this build of the SDK, has an unknown shape: render "unrecognised hook"
+ * rather than decoding it through a layout that might be wrong.
+ */
+export function revShareHookRecord(chainId: number, address: string): RevShareHookRecord | undefined {
+  const d = getDeployment(chainId);
+  if (d === undefined) return undefined;
+  const wanted = address.toLowerCase();
+  return d.revShareHooks.find((h) => h.address.toLowerCase() === wanted);
+}
+
+/**
+ * The duration clock of one of a deployment's time-bounded contracts, or a
+ * thrown error when that contract is not deployed on this chain.
+ */
+export function requireDurationClock(
+  deployment: LatchDeployment,
+  key: keyof LatchDeployment["durationClocks"],
+): DurationClock {
+  const clock = deployment.durationClocks[key];
+  if (clock === null) {
+    throw new Error(`${key} is not deployed on ${deployment.name} (${deployment.chainId}), so it has no clock.`);
+  }
+  return clock;
+}
+
+/**
+ * The kit v2 stack on a chain, every address present, or a thrown error naming
+ * what is missing. A partially filled group is a deployment in progress: a kit
+ * whose lockers or guards are not recorded cannot be checked, so it is refused.
+ */
+export function requireLaunchpadV2(deployment: LatchDeployment): { readonly [K in keyof LaunchpadV2Deployment]: Address } {
+  const g = deployment.launchpadV2;
+  const missing = (Object.keys(g) as (keyof LaunchpadV2Deployment)[]).filter((k) => g[k] === null);
+  if (missing.length > 0) {
+    throw new Error(
+      `LaunchpadKitV2 is not deployed on ${deployment.name} (${deployment.chainId}): ${missing.join(", ")} ` +
+        "recorded as null in @latchprotocol/sdk deployments.",
+    );
+  }
+  return g as { readonly [K in keyof LaunchpadV2Deployment]: Address };
+}
+
 export function explorerTxUrl(chainId: LatchChainId, hash: string): string {
   return `${LATCH_DEPLOYMENTS[chainId].explorer}/tx/${hash}`;
 }
@@ -697,3 +1157,8 @@ export function explorerTxUrl(chainId: LatchChainId, hash: string): string {
 export function explorerAddressUrl(chainId: LatchChainId, address: string): string {
   return `${LATCH_DEPLOYMENTS[chainId].explorer}/address/${address}`;
 }
+
+// Safe v1.4.1 contract addresses per chain (see ./safe.ts). Re-exported here so
+// the `deployments` namespace and the `./deployments` subpath carry them.
+export { SAFE_CONTRACTS, SAFE_CONTRACT_CHAIN_IDS, SAFE_TX_TYPES, requireSafeContracts, safeContractsFor } from "./safe.js";
+export type { SafeContracts } from "./safe.js";

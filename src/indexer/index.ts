@@ -131,11 +131,24 @@ export function buildHookPermissionsEntity(
 }
 
 /**
- * Direction of a swap, inferred from its signed amounts.
+ * Direction of a swap, inferred from the `amount0` its `Swap` event emitted.
  *
- * A positive `amount0` means currency0 entered the pool, which is a
- * zero-for-one swap.
+ * `Swap.amount0` / `amount1` are the swap's BalanceDelta from the CALLER's
+ * side: NEGATIVE means the caller paid that currency in, positive means the
+ * caller received it. A zero-for-one swap pays currency0 in, so it has a
+ * NEGATIVE `amount0`.
+ *
+ * (The inherited `ICLPoolManager` docstring calls these "the delta of the
+ * currency0 balance of the pool", which is the opposite sign and is wrong.)
+ *
+ * Verified on Robinhood Chain (4663), tx
+ * 0x68286e9b10e1e4d7e42adc9bc02bda0484ac53f6943dc8cd37cfd1d959bc629a: the event
+ * emitted amount0 = -1e18 and amount1 = +996006981039903216, and in the same tx
+ * exactly 1e18 of currency0 (LTT1) moved INTO the Vault.
+ *
+ * BEHAVIOUR FIX: before this change the function returned `amount0 > 0n`,
+ * reporting every swap backwards.
  */
 export function swapIsZeroForOne(amount0: bigint): boolean {
-  return amount0 > 0n;
+  return amount0 < 0n;
 }

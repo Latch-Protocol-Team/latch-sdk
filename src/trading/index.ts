@@ -22,6 +22,8 @@
 import type { Abi, Address, Hex } from "viem";
 
 import {
+  BIN_POSITION_MANAGER_ABI,
+  BIN_QUOTER_ABI,
   CL_POSITION_MANAGER_ABI,
   CL_QUOTER_ABI,
   UNIVERSAL_ROUTER_ABI,
@@ -34,8 +36,15 @@ export * from "./generated/abi.js";
 export const TradingAbis = {
   UniversalRouter: UNIVERSAL_ROUTER_ABI,
   CLQuoter: CL_QUOTER_ABI,
+  BinQuoter: BIN_QUOTER_ABI,
   CLPositionManager: CL_POSITION_MANAGER_ABI,
+  BinPositionManager: BIN_POSITION_MANAGER_ABI,
 } as const satisfies Record<string, Abi>;
+
+/** Which quoter answers for a pool type. The two share the parameter struct, not the address. */
+export function quoterAbiFor(poolType: "CL" | "BIN") {
+  return poolType === "CL" ? CL_QUOTER_ABI : BIN_QUOTER_ABI;
+}
 
 /** `IQuoter.QuoteExactSingleParams`. */
 export interface QuoteExactSingleParams {
@@ -99,6 +108,33 @@ export function quoteExactInputSingle(args: {
   return {
     address: args.quoter,
     abi: CL_QUOTER_ABI,
+    functionName: "quoteExactInputSingle",
+    args: [
+      {
+        poolKey: args.poolKey,
+        zeroForOne: zeroForOne(args.poolKey, args.tokenIn),
+        exactAmount: args.amountIn,
+        hookData: args.hookData ?? "0x",
+      },
+    ],
+  } as const;
+}
+
+/**
+ * `BinQuoter.quoteExactInputSingle`. Identical arguments to the CL form; the
+ * Bin quoter names the direction `swapForY`, which is the same bit as
+ * `zeroForOne` (currency0 is X). `eth_call`-only, like every quoter call.
+ */
+export function quoteBinExactInputSingle(args: {
+  readonly quoter: Address;
+  readonly poolKey: PoolKey;
+  readonly tokenIn: Address;
+  readonly amountIn: bigint;
+  readonly hookData?: Hex;
+}) {
+  return {
+    address: args.quoter,
+    abi: BIN_QUOTER_ABI,
     functionName: "quoteExactInputSingle",
     args: [
       {

@@ -39,6 +39,11 @@
       "import": "./dist/deployments/index.js",
       "default": "./dist/deployments/index.js"
     },
+    "./safe": {
+      "types": "./dist/safe/index.d.ts",
+      "import": "./dist/safe/index.js",
+      "default": "./dist/safe/index.js"
+    },
     "./registry": {
       "types": "./dist/registry/index.d.ts",
       "import": "./dist/registry/index.js",
@@ -48,6 +53,31 @@
       "types": "./dist/launchpad/index.d.ts",
       "import": "./dist/launchpad/index.js",
       "default": "./dist/launchpad/index.js"
+    },
+    "./split": {
+      "types": "./dist/split/index.d.ts",
+      "import": "./dist/split/index.js",
+      "default": "./dist/split/index.js"
+    },
+    "./lock": {
+      "types": "./dist/lock/index.d.ts",
+      "import": "./dist/lock/index.js",
+      "default": "./dist/lock/index.js"
+    },
+    "./price": {
+      "types": "./dist/price/index.d.ts",
+      "import": "./dist/price/index.js",
+      "default": "./dist/price/index.js"
+    },
+    "./trust": {
+      "types": "./dist/trust/index.d.ts",
+      "import": "./dist/trust/index.js",
+      "default": "./dist/trust/index.js"
+    },
+    "./drop": {
+      "types": "./dist/drop/index.d.ts",
+      "import": "./dist/drop/index.js",
+      "default": "./dist/drop/index.js"
     },
     "./trading": {
       "types": "./dist/trading/index.d.ts",
@@ -69,6 +99,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "build:ci": "tsc -p tsconfig.build.json",
     "prepublishOnly": "npm run build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
@@ -94,8 +125,11 @@
     "viem": "^2.21.0"
   },
   "devDependencies": {
+    "@types/node": "^22.7.0",
+    "blockstore-core": "^7.0.1",
+    "ipfs-unixfs-importer": "^17.1.1",
+    "multiformats": "^14.0.5",
     "typescript": "^5.6.0",
-    "vitest": "^2.1.0",
-    "@types/node": "^22.7.0"
+    "vitest": "^2.1.0"
   }
 }

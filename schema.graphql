@@ -279,9 +279,9 @@ type Swap @entity {
 
   "Caller recorded by the pool manager - usually a router, not the end user."
   sender: Bytes!
-  "Signed change in currency0."
+  "Signed currency0 delta from the CALLER's side: negative = paid in by the caller, positive = received. Not the pool's balance change."
   amount0: BigInt!
-  "Signed change in currency1."
+  "Signed currency1 delta from the CALLER's side: negative = paid in by the caller, positive = received."
   amount1: BigInt!
   "True when currency0 was the input."
   zeroForOne: Boolean!

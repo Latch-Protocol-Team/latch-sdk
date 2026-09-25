@@ -27,6 +27,24 @@
  *                  is evidence for a decision already encoded in
  *                  `chains/endpoints.ts`, not something a consumer needs, and
  *                  it goes stale in a way that looks authoritative.
+ *   test/          REMOVED FROM THE MIRROR 2026-09-25, and the reason is not
+ *                  squeamishness about showing tests. THEY CANNOT RUN THERE.
+ *                  `test/safe.test.ts` reads its fixtures from
+ *                  `../../../ops/governance`, which exists only in the monorepo,
+ *                  so `npm test` in the public repo throws ENOENT on the first
+ *                  file. A suite that fails the moment anyone runs it makes the
+ *                  package look broken and teaches a reader to distrust the
+ *                  rest, which is worse than shipping no suite at all.
+ *
+ *                  It also named an operator wallet in a test title and a call
+ *                  array. That wallet is already public on chain, so this is
+ *                  tidiness rather than a leak — the public-surface rule is
+ *                  about not advertising operator addresses, and the ENOENT
+ *                  above is the part that actually decides the exclusion.
+ *
+ *                  If the suite should ship one day, the fix is to move those
+ *                  fixtures INTO the SDK so the tests are self-contained, not to
+ *                  add the directory back and hope.
  *
  * Usage:  node scripts/sync-public-repo.mjs [--dest <path>] [--dry-run]
  */
@@ -51,7 +69,7 @@ const DEST =
  *  a 90 KB PNG has no business in a dependency.
  *  `prompts` holds the paste-into-an-agent integration prompts. Same reasoning:
  *  they are repository content for a human, not package content. */
-const INCLUDE_DIRS = ['src', 'test', 'scripts', 'assets', 'prompts']
+const INCLUDE_DIRS = ['src', 'scripts', 'assets', 'prompts']
 const INCLUDE_FILES = [
   'package.json',
   'package-lock.json',

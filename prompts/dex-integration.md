@@ -133,6 +133,14 @@ The protocol fee is NOT one of my options: it is set by Latch governance on the 
 pool manager, capped at 0.4% by core, and I cannot change it. Say so plainly in the README
 you write rather than leaving me to discover it.
 
+Do not hardcode what that fee is, and do not take my word for it either. Read it:
+`feeForLpFee(lpFee)` on the protocol fee controller returns the exact pips for a tier, and
+`protocolFeeSplitRatio()` returns the share of the total swap fee the protocol takes. Both
+are plain view calls. Put the number your quote screen shows behind those reads, so it
+cannot drift from what the pool actually charges — the fee is stamped into a pool at
+`initialize` and never re-read, so two pools of the same tier CAN carry different protocol
+fees if the policy changed between their births.
+
 ## When you are done
 
 Do not tell me it works. Show me: the verify script's output, a real quote against the

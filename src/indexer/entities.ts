@@ -223,8 +223,15 @@ export interface Swap extends EventSourced {
   readonly poolType: PoolType;
   readonly hook?: Ref<Hook>;
   readonly sender: Address;
+  /**
+   * Currency0 delta from the CALLER's side, as `Swap` emits it: negative means
+   * the caller paid it in. Not the pool's balance change, whatever the
+   * inherited `ICLPoolManager` docstring says. See `swapIsZeroForOne`.
+   */
   readonly amount0: bigint;
+  /** Currency1 delta from the caller's side. Negative = paid in. */
   readonly amount1: bigint;
+  /** True when currency0 was the input, i.e. `amount0 < 0`. */
   readonly zeroForOne: boolean;
   readonly fee: number;
   readonly protocolFee: number;

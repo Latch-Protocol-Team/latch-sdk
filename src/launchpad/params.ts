@@ -28,12 +28,21 @@
    Both succeed permanently at the wrong settings. Those two are why this file
    exists; the rest is ergonomics.
 
+   TWO KIT GENERATIONS, ONE PARAMETER TYPE. `LaunchParams.decaySeconds` is
+   always seconds. The timestamp kit (Option B, 2026-09-13) takes it as-is. The
+   block-numbered kit still deployed on Robinhood takes `decayBlocks`, and
+   `launchParamsToBlockTuple` converts at that kit's DECLARED block time — the
+   same conversion the kit applies to its own presets. Every "how long does this
+   really last" answer for a block kit then uses the chain's REAL contract block
+   time, because on Robinhood those two numbers are 120x apart.
+
    The rule the checks follow: ERROR on what the chain would refuse, WARN on
    what the chain would accept but a human probably did not mean.
    ============================================================================ */
 
 import type { Address } from "viem";
 
+import type { DurationClock } from "../deployments/index.js";
 import {
   LAUNCH_GUARD_LIMITS,
   PRESET,
@@ -79,7 +88,7 @@ export interface HookListingParams {
   readonly metadata: LatchMetadataInput;
 }
 
-/** Mirrors `struct LaunchParams`, field for field and in order. */
+/** Mirrors the timestamp kit's `struct LaunchParams`, field for field and in order. */
 export interface LaunchParams {
   readonly launchToken: Address;
   /** `0x0000…0000` is the chain's native asset. The LAUNCH token may not be native. */
@@ -92,15 +101,18 @@ export interface LaunchParams {
   readonly initialFeeBips: number;
   /** Ignored unless `preset === PRESET.Custom`. */
   readonly finalFeeBips: number;
-  /** Ignored unless `preset === PRESET.Custom`. **In BLOCKS, not seconds.** */
-  readonly decayBlocks: number;
+  /**
+   * Ignored unless `preset === PRESET.Custom`. SECONDS of `block.timestamp`,
+   * inside [60 s, 30 days] on the timestamp hook.
+   */
+  readonly decaySeconds: number;
   /** Ignored unless `preset === PRESET.Custom`. */
   readonly enabled: boolean;
-  /** Seconds from THIS TRANSACTION LANDING until trading opens. Converted at the kit's block time. */
+  /** Seconds from THIS TRANSACTION LANDING until trading opens. */
   readonly startDelaySeconds: number;
   /** Per-TRANSACTION cap on a buy's input, in quote units. `0n` disables. NOT per wallet. */
   readonly maxBuyPerTx: bigint;
-  /** May reconfigure until `startBlock`. Zero address means `msg.sender`. Not transferable. */
+  /** May reconfigure until trading opens. Zero address means `msg.sender`. Not transferable. */
   readonly launchOperator: Address;
   readonly seed: SeedParams;
   readonly listing: HookListingParams;
@@ -119,23 +131,62 @@ export interface LaunchIssue {
   readonly contractError?: string;
 }
 
-/** Deployment facts the validator cannot know and must not assume. */
-export interface LaunchLimits {
+/**
+ * Deployment facts the validator cannot know and must not assume.
+ *
+ * A discriminated union on `durationClock`, taken from
+ * `LatchDeployment.durationClocks.launchpadKit`. The two generations need
+ * different facts, and a block kit without its two block times is refused by the
+ * type checker rather than rendered with a guess.
+ */
+export type LaunchLimits = TimestampLaunchLimits | BlockLaunchLimits;
+
+/** The timestamp kit: nothing about the chain's cadence is needed. */
+export interface TimestampLaunchLimits {
+  readonly durationClock: "timestamp";
+}
+
+/** The block-numbered kit still deployed on Robinhood. */
+export interface BlockLaunchLimits {
+  readonly durationClock: "contract-block";
   /**
-   * From the kit's `blockTimeCentis()`. Hundredths of a second.
-   * Robinhood's kit is 10; a 12-second chain is 1200.
+   * From the kit's `blockTimeCentis()`. Hundredths of a second. What the KIT
+   * BELIEVES and uses to turn seconds into blocks — a conversion input, not a
+   * fact about the chain. The live Robinhood kit declares 10.
    */
   readonly blockTimeCentis: number;
   /**
-   * From `LaunchGuardHook.MAX_DECAY_BLOCKS()` — SCREAMING_SNAKE on chain, and
-   * there is no camelCase alias. A probe for `maxDecayBlocks()` reverts.
+   * The REAL cadence of `block.number` as the hook sees it, in hundredths of a
+   * second — `LatchDeployment.contractBlockTimeCentis`. Required, not defaulted
+   * to `blockTimeCentis`, because the two are 120x apart on Robinhood.
    */
+  readonly contractBlockTimeCentis: number;
+  /** From that hook's `MAX_DECAY_BLOCKS()`. */
   readonly maxDecayBlocks?: bigint;
-  /** From `LaunchGuardHook.MAX_START_DELAY()`. Same naming caveat. */
+  /** From that hook's `MAX_START_DELAY()`. */
   readonly maxStartDelayBlocks?: bigint;
 }
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+/**
+ * Real / declared block time for a block kit, or `null` when they agree within
+ * a factor of 1.5 (or the kit is timestamp-clocked, where there is no stretch).
+ */
+function clockStretchOf(limits: LaunchLimits): number | null {
+  if (limits.durationClock === "timestamp") return null;
+  if (limits.blockTimeCentis <= 0 || limits.contractBlockTimeCentis <= 0) {
+    throw new RangeError("blockTimeCentis and contractBlockTimeCentis must be positive");
+  }
+  const ratio = limits.contractBlockTimeCentis / limits.blockTimeCentis;
+  return ratio > 1.5 || ratio < 1 / 1.5 ? ratio : null;
+}
+
+function formatStretch(stretch: number): string {
+  return stretch >= 1
+    ? `${Number.parseFloat(stretch.toFixed(1))}x longer than declared`
+    : `${Number.parseFloat((1 / stretch).toFixed(1))}x shorter than declared`;
+}
 
 /**
  * Every objection to a `LaunchParams`, cheapest checks first.
@@ -188,11 +239,8 @@ export function validateLaunchParams(p: LaunchParams, limits: LaunchLimits): rea
   }
 
   if (preset === PRESET.Custom) {
-    /* THE ZERO-VALUE TRAP. Custom is 0, so an unset field lands here. The
-       chain accepts a coherent Custom happily; what it cannot know is that
-       nobody chose it. An all-zero Custom is not a launch configuration, it is
-       a missing one. */
-    if (p.initialFeeBips === 0 && p.finalFeeBips === 0 && p.decayBlocks === 0 && !p.enabled) {
+    /* THE ZERO-VALUE TRAP. Custom is 0, so an unset field lands here. */
+    if (p.initialFeeBips === 0 && p.finalFeeBips === 0 && p.decaySeconds === 0 && !p.enabled) {
       err(
         "preset",
         "preset is Custom (the ZERO value) with every custom field empty — which is what an " +
@@ -223,28 +271,7 @@ export function validateLaunchParams(p: LaunchParams, limits: LaunchLimits): rea
           "InvalidFeeSchedule(uint24,uint24)",
         );
       }
-      if (p.decayBlocks === 0) {
-        err("decayBlocks", "decayBlocks must be non-zero.", "InvalidDecayBlocks(uint32)");
-      } else if (limits.maxDecayBlocks !== undefined && BigInt(p.decayBlocks) > limits.maxDecayBlocks) {
-        err(
-          "decayBlocks",
-          `decayBlocks ${p.decayBlocks} exceeds this deployment's MAX_DECAY_BLOCKS ` +
-            `(${limits.maxDecayBlocks}).`,
-          "DecayWindowTooLong(uint256)",
-        );
-      }
-      /* decayBlocks is in BLOCKS while every other duration here is in seconds.
-         On a 0.102s chain the difference is 118x, so say what it means. */
-      if (p.decayBlocks > 0) {
-        const seconds = blocksToSeconds(p.decayBlocks, limits.blockTimeCentis);
-        if (seconds < 60) {
-          warn(
-            "decayBlocks",
-            `${p.decayBlocks} blocks is only ${humanDuration(seconds)} on this chain ` +
-              `(${limits.blockTimeCentis / 100}s per block). decayBlocks is in BLOCKS, not seconds.`,
-          );
-        }
-      }
+      validateCustomDecay(p, limits, err, warn);
     }
   } else if (preset >= 1) {
     const name = presetName(preset) as Exclude<PresetName, "Custom">;
@@ -256,24 +283,30 @@ export function validateLaunchParams(p: LaunchParams, limits: LaunchLimits): rea
         "MaxBuyRequiredByPreset(uint8)",
       );
     }
-    if (
-      p.initialFeeBips !== 0 ||
-      p.finalFeeBips !== 0 ||
-      p.decayBlocks !== 0 ||
-      p.enabled
-    ) {
+    if (p.initialFeeBips !== 0 || p.finalFeeBips !== 0 || p.decaySeconds !== 0 || p.enabled) {
       warn(
         "preset",
-        `Preset ${name} OVERWRITES initialFeeBips, finalFeeBips, decayBlocks and enabled. ` +
+        `Preset ${name} OVERWRITES initialFeeBips, finalFeeBips, decaySeconds and enabled. ` +
           "The values you set in those fields are ignored — set preset to Custom to use them.",
       );
     }
-    if (limits.maxDecayBlocks !== undefined) {
+    if (limits.durationClock === "contract-block") {
+      const stretch = clockStretchOf(limits);
       const blocks = secondsToBlocks(pp.windowSeconds, limits.blockTimeCentis);
-      if (blocks > limits.maxDecayBlocks) {
+      if (stretch !== null) {
+        warn(
+          "preset",
+          `Preset ${name} promises a ${humanDuration(pp.windowSeconds)} window, but this block-numbered kit ` +
+            `converts seconds at ${limits.blockTimeCentis / 100}s per block while the hook's block.number ` +
+            `advances every ${limits.contractBlockTimeCentis / 100}s. The window is ${blocks} blocks, which ` +
+            `really lasts ${humanDuration(blocksToSeconds(blocks, limits.contractBlockTimeCentis))} ` +
+            `(${formatStretch(stretch)}).`,
+        );
+      }
+      if (limits.maxDecayBlocks !== undefined && blocks > limits.maxDecayBlocks) {
         err(
           "preset",
-          `Preset ${name}'s ${pp.windowSeconds}s window is ${blocks} blocks on this chain, ` +
+          `Preset ${name}'s ${pp.windowSeconds}s window is ${blocks} blocks on this kit, ` +
             `above MAX_DECAY_BLOCKS (${limits.maxDecayBlocks}).`,
           "DecayWindowTooLong(uint256)",
         );
@@ -284,12 +317,30 @@ export function validateLaunchParams(p: LaunchParams, limits: LaunchLimits): rea
   /* ---- start delay ---- */
   if (p.startDelaySeconds < 0) {
     err("startDelaySeconds", "startDelaySeconds must not be negative.");
-  } else if (p.startDelaySeconds > 0 && limits.maxStartDelayBlocks !== undefined) {
-    const blocks = secondsToBlocks(p.startDelaySeconds, limits.blockTimeCentis);
-    if (blocks > limits.maxStartDelayBlocks) {
+  } else if (limits.durationClock === "timestamp") {
+    if (p.startDelaySeconds > LAUNCH_GUARD_LIMITS.MAX_START_DELAY_SECONDS) {
       err(
         "startDelaySeconds",
-        `A ${humanDuration(p.startDelaySeconds)} delay is ${blocks} blocks on this chain, ` +
+        `A ${humanDuration(p.startDelaySeconds)} delay is above the hook's MAX_START_DELAY_SECONDS ` +
+          `(${humanDuration(LAUNCH_GUARD_LIMITS.MAX_START_DELAY_SECONDS)}).`,
+        "StartDelayTooLong(uint256)",
+      );
+    }
+  } else if (p.startDelaySeconds > 0) {
+    const blocks = secondsToBlocks(p.startDelaySeconds, limits.blockTimeCentis);
+    const stretch = clockStretchOf(limits);
+    if (stretch !== null) {
+      warn(
+        "startDelaySeconds",
+        `A ${humanDuration(p.startDelaySeconds)} delay becomes ${blocks} blocks at this kit's declared ` +
+          `${limits.blockTimeCentis / 100}s per block, and trading really opens after ` +
+          `${humanDuration(blocksToSeconds(blocks, limits.contractBlockTimeCentis))} (${formatStretch(stretch)}).`,
+      );
+    }
+    if (limits.maxStartDelayBlocks !== undefined && blocks > limits.maxStartDelayBlocks) {
+      err(
+        "startDelaySeconds",
+        `A ${humanDuration(p.startDelaySeconds)} delay is ${blocks} blocks on this kit, ` +
           `above MAX_START_DELAY (${limits.maxStartDelayBlocks}).`,
         "StartDelayTooLong(uint256)",
       );
@@ -321,8 +372,8 @@ export function validateLaunchParams(p: LaunchParams, limits: LaunchLimits): rea
     warn(
       "launchOperator",
       "launchOperator is the zero address, which means msg.sender. The operator is the ONLY " +
-        "address that can reconfigure before trading opens, it freezes at startBlock, and it is " +
-        "not transferable — so make it deliberate rather than incidental.",
+        "address that can reconfigure before trading opens, it freezes when trading opens, and it " +
+        "is not transferable — so make it deliberate rather than incidental.",
     );
   }
   if (p.maxBuyPerTx > 0n) {
@@ -334,6 +385,55 @@ export function validateLaunchParams(p: LaunchParams, limits: LaunchLimits): rea
   }
 
   return issues;
+}
+
+function validateCustomDecay(
+  p: LaunchParams,
+  limits: LaunchLimits,
+  err: (field: string, message: string, contractError?: string) => void,
+  warn: (field: string, message: string) => void,
+): void {
+  if (limits.durationClock === "timestamp") {
+    if (p.decaySeconds < LAUNCH_GUARD_LIMITS.MIN_DECAY_SECONDS) {
+      err(
+        "decaySeconds",
+        `decaySeconds ${p.decaySeconds} is below the hook's MIN_DECAY_SECONDS ` +
+          `(${LAUNCH_GUARD_LIMITS.MIN_DECAY_SECONDS}). A shorter window is within sequencer clock skew.`,
+        "InvalidDecaySeconds(uint32)",
+      );
+    } else if (p.decaySeconds > LAUNCH_GUARD_LIMITS.MAX_DECAY_SECONDS) {
+      err(
+        "decaySeconds",
+        `decaySeconds ${p.decaySeconds} (${humanDuration(p.decaySeconds)}) is above the hook's ` +
+          `MAX_DECAY_SECONDS (${humanDuration(LAUNCH_GUARD_LIMITS.MAX_DECAY_SECONDS)}).`,
+        "InvalidDecaySeconds(uint32)",
+      );
+    }
+    return;
+  }
+
+  if (p.decaySeconds <= 0) {
+    err("decaySeconds", "decaySeconds must be positive.", "InvalidDecayBlocks(uint32)");
+    return;
+  }
+  const blocks = secondsToBlocks(p.decaySeconds, limits.blockTimeCentis);
+  if (limits.maxDecayBlocks !== undefined && blocks > limits.maxDecayBlocks) {
+    err(
+      "decaySeconds",
+      `decaySeconds ${p.decaySeconds} is ${blocks} blocks on this block-numbered kit, above ` +
+        `MAX_DECAY_BLOCKS (${limits.maxDecayBlocks}).`,
+      "InvalidDecayBlocks(uint32)",
+    );
+  }
+  const stretch = clockStretchOf(limits);
+  if (stretch !== null) {
+    warn(
+      "decaySeconds",
+      `${humanDuration(p.decaySeconds)} becomes ${blocks} blocks at this kit's declared ` +
+        `${limits.blockTimeCentis / 100}s per block, which really lasts ` +
+        `${humanDuration(blocksToSeconds(blocks, limits.contractBlockTimeCentis))} (${formatStretch(stretch)}).`,
+    );
+  }
 }
 
 /** {@link validateLaunchParams}, throwing on the first error. For scripts. */
@@ -350,16 +450,24 @@ export function assertLaunchParams(p: LaunchParams, limits: LaunchLimits): void 
 /** The resolved, human-readable shape of a launch. */
 export interface LaunchSummary {
   readonly preset: PresetName;
-  /** Fee at the first block of the window. */
+  /** Which kit generation this summary describes. */
+  readonly durationClock: DurationClock;
+  /** Fee at the start of the window. */
   readonly initialFee: string;
   /** Fee once the window has elapsed. */
   readonly finalFee: string;
-  /** Decay window in blocks, resolved through the preset where one applies. */
-  readonly decayBlocks: bigint;
-  /** The same window as wall-clock time on THIS chain. The number that matters. */
+  /** Seconds the configuration asks for (the preset's own, or `decaySeconds` for Custom). */
+  readonly decaySeconds: number;
+  /** Block kits only: the window in contract blocks. `null` on a timestamp kit. */
+  readonly decayBlocks: bigint | null;
+  /** The window as REAL wall-clock time on this chain. The number that matters. */
   readonly decayWindow: string;
-  /** When trading opens, relative to the transaction landing. */
+  /** What the configuration promises. Equals `decayWindow` except on a mis-sized block kit. */
+  readonly declaredDecayWindow: string;
+  /** When trading really opens, relative to the transaction landing. */
   readonly opensAfter: string;
+  /** `contractBlockTimeCentis / blockTimeCentis` on a mis-sized block kit, else `null`. */
+  readonly clockStretch: number | null;
   readonly gated: boolean;
   readonly maxBuyPerTx: bigint;
   /** What this configuration does not protect against. Never empty. */
@@ -368,45 +476,46 @@ export interface LaunchSummary {
 
 /**
  * Resolves a `LaunchParams` into the summary a launcher should read before
- * broadcasting — with the decay window in HOURS, not blocks.
+ * broadcasting — with the decay window in real time, not blocks.
  *
  * This is a local preview. `previewSchedule(params)` on the deployed kit is
- * the authoritative one and should be shown beside it; they agreeing is itself
- * a useful check that the SDK's block time matches the kit's.
+ * the authoritative one and should be shown beside it.
  */
 export function describeLaunch(p: LaunchParams, limits: LaunchLimits): LaunchSummary {
   const preset = parsePreset(p.preset);
   const name = presetName(preset);
+  const stretch = clockStretchOf(limits);
+  const custom = name === "Custom";
+  const pp = custom ? undefined : PRESET_PARAMS[name];
+  const seconds = pp === undefined ? p.decaySeconds : pp.windowSeconds;
 
-  if (name === "Custom") {
-    const seconds = blocksToSeconds(p.decayBlocks, limits.blockTimeCentis);
-    return {
-      preset: name,
-      initialFee: formatPips(p.initialFeeBips),
-      finalFee: formatPips(p.finalFeeBips),
-      decayBlocks: BigInt(p.decayBlocks),
-      decayWindow: humanDuration(seconds),
-      opensAfter: p.startDelaySeconds === 0 ? "immediately" : humanDuration(p.startDelaySeconds),
-      gated: p.enabled,
-      maxBuyPerTx: p.maxBuyPerTx,
-      doesNotProtectAgainst:
-        "whatever this custom schedule does not cover. No preset here offers a per-wallet cap, " +
-        "an allowlist, or protection on any other venue.",
-    };
-  }
+  const real = (s: number): { blocks: bigint | null; seconds: number } => {
+    if (limits.durationClock === "timestamp") return { blocks: null, seconds: s };
+    const blocks = secondsToBlocks(s, limits.blockTimeCentis);
+    return { blocks, seconds: blocksToSeconds(blocks, limits.contractBlockTimeCentis) };
+  };
 
-  const pp = PRESET_PARAMS[name];
-  const blocks = secondsToBlocks(pp.windowSeconds, limits.blockTimeCentis);
+  const decay = real(seconds);
+  const opensAfter = p.startDelaySeconds === 0 ? "immediately" : humanDuration(real(p.startDelaySeconds).seconds);
+
   return {
     preset: name,
-    initialFee: formatPips(pp.initialFeeBips),
-    finalFee: formatPips(pp.finalFeeBips),
-    decayBlocks: blocks,
-    decayWindow: humanDuration(pp.windowSeconds),
-    opensAfter: p.startDelaySeconds === 0 ? "immediately" : humanDuration(p.startDelaySeconds),
-    gated: pp.enabled,
+    durationClock: limits.durationClock,
+    initialFee: formatPips(pp === undefined ? p.initialFeeBips : pp.initialFeeBips),
+    finalFee: formatPips(pp === undefined ? p.finalFeeBips : pp.finalFeeBips),
+    decaySeconds: seconds,
+    decayBlocks: decay.blocks,
+    decayWindow: humanDuration(decay.seconds),
+    declaredDecayWindow: humanDuration(seconds),
+    opensAfter,
+    clockStretch: stretch,
+    gated: pp === undefined ? p.enabled : pp.enabled,
     maxBuyPerTx: p.maxBuyPerTx,
-    doesNotProtectAgainst: pp.doesNotProtectAgainst,
+    doesNotProtectAgainst:
+      pp === undefined
+        ? "whatever this custom schedule does not cover. No preset here offers a per-wallet cap, " +
+          "an allowlist, or protection on any other venue."
+        : pp.doesNotProtectAgainst,
   };
 }
 
@@ -432,7 +541,7 @@ export function buildLaunchParams(input: {
   readonly custom?: {
     readonly initialFeeBips: number;
     readonly finalFeeBips: number;
-    readonly decayBlocks: number;
+    readonly decaySeconds: number;
     readonly enabled: boolean;
   };
   readonly listing?: HookListingParams;
@@ -441,11 +550,11 @@ export function buildLaunchParams(input: {
   if (preset === PRESET.Custom && input.custom === undefined) {
     throw new Error(
       "preset is Custom but no `custom` schedule was supplied. Custom reads initialFeeBips, " +
-        "finalFeeBips, decayBlocks and enabled — leaving them at zero produces an unprotected " +
+        "finalFeeBips, decaySeconds and enabled — leaving them at zero produces an unprotected " +
         "launch that the chain accepts without complaint.",
     );
   }
-  const custom = input.custom ?? { initialFeeBips: 0, finalFeeBips: 0, decayBlocks: 0, enabled: false };
+  const custom = input.custom ?? { initialFeeBips: 0, finalFeeBips: 0, decaySeconds: 0, enabled: false };
 
   return {
     launchToken: input.launchToken,
@@ -455,7 +564,7 @@ export function buildLaunchParams(input: {
     preset,
     initialFeeBips: custom.initialFeeBips,
     finalFeeBips: custom.finalFeeBips,
-    decayBlocks: custom.decayBlocks,
+    decaySeconds: custom.decaySeconds,
     enabled: custom.enabled,
     startDelaySeconds: input.startDelaySeconds ?? 0,
     maxBuyPerTx: input.maxBuyPerTx ?? 0n,
@@ -469,26 +578,8 @@ export function buildLaunchParams(input: {
   };
 }
 
-/**
- * The tuple `viem` wants for `createLaunch`, in ABI field order.
- *
- * Kept beside the interface so the two cannot drift: if a field is added to
- * `LaunchParams` upstream, this function stops compiling.
- */
-export function launchParamsToTuple(p: LaunchParams) {
+function seedAndListing(p: LaunchParams) {
   return {
-    launchToken: p.launchToken,
-    quoteToken: p.quoteToken,
-    tickSpacing: p.tickSpacing,
-    sqrtPriceX96: p.sqrtPriceX96,
-    preset: p.preset,
-    initialFeeBips: p.initialFeeBips,
-    finalFeeBips: p.finalFeeBips,
-    decayBlocks: p.decayBlocks,
-    enabled: p.enabled,
-    startDelaySeconds: p.startDelaySeconds,
-    maxBuyPerTx: p.maxBuyPerTx,
-    launchOperator: p.launchOperator,
     seed: {
       tickLower: p.seed.tickLower,
       tickUpper: p.seed.tickUpper,
@@ -508,5 +599,55 @@ export function launchParamsToTuple(p: LaunchParams) {
         chainIds: [...p.listing.metadata.chainIds],
       },
     },
+  } as const;
+}
+
+/**
+ * The tuple `viem` wants for the TIMESTAMP kit's `createLaunch` (`LAUNCHPAD_KIT_ABI`),
+ * in ABI field order. If a field is added upstream, this stops compiling.
+ */
+export function launchParamsToTuple(p: LaunchParams) {
+  return {
+    launchToken: p.launchToken,
+    quoteToken: p.quoteToken,
+    tickSpacing: p.tickSpacing,
+    sqrtPriceX96: p.sqrtPriceX96,
+    preset: p.preset,
+    initialFeeBips: p.initialFeeBips,
+    finalFeeBips: p.finalFeeBips,
+    decaySeconds: p.decaySeconds,
+    enabled: p.enabled,
+    startDelaySeconds: p.startDelaySeconds,
+    maxBuyPerTx: p.maxBuyPerTx,
+    launchOperator: p.launchOperator,
+    ...seedAndListing(p),
+  } as const;
+}
+
+/**
+ * The tuple for the BLOCK-NUMBERED kit's `createLaunch` (`LAUNCHPAD_KIT_BLOCK_ABI`).
+ *
+ * `decaySeconds` is converted to `decayBlocks` at the kit's DECLARED block time,
+ * which is exactly what that kit does to its own presets. It is NOT converted at
+ * the real contract clock, because the kit would then disagree with itself; the
+ * real duration is what `describeLaunch` reports.
+ */
+export function launchParamsToBlockTuple(p: LaunchParams, limits: BlockLaunchLimits) {
+  const decayBlocks = p.decaySeconds === 0 ? 0n : secondsToBlocks(p.decaySeconds, limits.blockTimeCentis);
+  if (decayBlocks > 0xffff_ffffn) throw new RangeError("decayBlocks does not fit uint32");
+  return {
+    launchToken: p.launchToken,
+    quoteToken: p.quoteToken,
+    tickSpacing: p.tickSpacing,
+    sqrtPriceX96: p.sqrtPriceX96,
+    preset: p.preset,
+    initialFeeBips: p.initialFeeBips,
+    finalFeeBips: p.finalFeeBips,
+    decayBlocks: Number(decayBlocks),
+    enabled: p.enabled,
+    startDelaySeconds: p.startDelaySeconds,
+    maxBuyPerTx: p.maxBuyPerTx,
+    launchOperator: p.launchOperator,
+    ...seedAndListing(p),
   } as const;
 }

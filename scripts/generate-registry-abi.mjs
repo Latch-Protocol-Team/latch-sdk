@@ -45,6 +45,13 @@ const SOURCES = [
     keep: { function: null, event: null, error: null },
   },
   {
+    constant: "LATCH_LAUNCH_REGISTRY_ABI",
+    doc: "`LatchLaunchRegistry` - launches, their listings and launchpad provenance, full deployed surface.",
+    contract: "LatchLaunchRegistry",
+    artifact: join(REGISTRY_OUT, "LatchLaunchRegistry.sol", "LatchLaunchRegistry.json"),
+    keep: { function: null, event: null, error: null },
+  },
+  {
     constant: "LATCH_HOOK_REGISTRY_EVENTS_ABI",
     doc:
       "Events declared by `ILatchRegistry`. Between them the entire registry " +

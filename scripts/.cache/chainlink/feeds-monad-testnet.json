@@ -1,0 +1,162 @@
+[
+  {
+    "compareOffchain": "",
+    "contractAddress": "0x046eB184D683bb55eF3C4BEa0D6857309e12C114",
+    "contractType": "",
+    "contractVersion": 6,
+    "decimalPlaces": null,
+    "ens": "usdt-usd",
+    "formatDecimalPlaces": null,
+    "healthPrice": "",
+    "heartbeat": 86400,
+    "history": null,
+    "multiply": "100000000",
+    "name": "USDT / USD",
+    "pair": [
+      "",
+      ""
+    ],
+    "path": "usdt-usd",
+    "proxyAddress": "0xc8a72485e68af06308A8C888eB376AB322310Fa6",
+    "threshold": 0.3,
+    "valuePrefix": "",
+    "assetName": "",
+    "feedCategory": "",
+    "feedType": "",
+    "docs": {
+      "baseAssetEntityId": "crypto-USDT",
+      "hidden": true,
+      "quoteAssetEntityId": "forex-USD"
+    },
+    "decimals": 8,
+    "maxSubmissionValue": "95780971304118053647396689196894323976171195136475135"
+  },
+  {
+    "compareOffchain": "",
+    "contractAddress": "0x56395e94c93DE46598537C4A81811a7a743D0826",
+    "contractType": "",
+    "contractVersion": 6,
+    "decimalPlaces": null,
+    "ens": "usdc-usd",
+    "formatDecimalPlaces": null,
+    "healthPrice": "",
+    "heartbeat": 86400,
+    "history": null,
+    "multiply": "100000000",
+    "name": "USDC / USD",
+    "pair": [
+      "",
+      ""
+    ],
+    "path": "usdc-usd",
+    "proxyAddress": "0x39820e7965e29DC86b94F20eD04e9c5cCf9aFf95",
+    "threshold": 0.3,
+    "valuePrefix": "",
+    "assetName": "",
+    "feedCategory": "",
+    "feedType": "",
+    "docs": {
+      "baseAssetEntityId": "crypto-USDC",
+      "hidden": true,
+      "quoteAssetEntityId": "forex-USD"
+    },
+    "decimals": 8,
+    "maxSubmissionValue": "95780971304118053647396689196894323976171195136475135"
+  },
+  {
+    "compareOffchain": "",
+    "contractAddress": "0x5dEDB0E2674748e6c83179c316a2fd01BdA8d70B",
+    "contractType": "",
+    "contractVersion": 6,
+    "decimalPlaces": null,
+    "ens": "btc-usd",
+    "formatDecimalPlaces": null,
+    "healthPrice": "",
+    "heartbeat": 86400,
+    "history": null,
+    "multiply": "100000000",
+    "name": "BTC / USD",
+    "pair": [
+      "",
+      ""
+    ],
+    "path": "btc-usd",
+    "proxyAddress": "0x12C0F44368a02081ce58a936d1C1F606BB301715",
+    "threshold": 0.5,
+    "valuePrefix": "",
+    "assetName": "",
+    "feedCategory": "",
+    "feedType": "",
+    "docs": {
+      "baseAssetEntityId": "crypto-BTC",
+      "hidden": true,
+      "quoteAssetEntityId": "forex-USD"
+    },
+    "decimals": 8,
+    "maxSubmissionValue": "95780971304118053647396689196894323976171195136475135"
+  },
+  {
+    "compareOffchain": "",
+    "contractAddress": "0x70227F651bdC5e126cEfCF2b543cB01A83474BBF",
+    "contractType": "",
+    "contractVersion": 6,
+    "decimalPlaces": null,
+    "ens": "link-usd",
+    "formatDecimalPlaces": null,
+    "healthPrice": "",
+    "heartbeat": 86400,
+    "history": null,
+    "multiply": "100000000",
+    "name": "LINK / USD",
+    "pair": [
+      "",
+      ""
+    ],
+    "path": "link-usd",
+    "proxyAddress": "0x2A9FBFbf392594c4Dd7593C8a91cdEbc02e5b884",
+    "threshold": 0.5,
+    "valuePrefix": "",
+    "assetName": "",
+    "feedCategory": "",
+    "feedType": "",
+    "docs": {
+      "baseAssetEntityId": "crypto-LINK",
+      "hidden": true,
+      "quoteAssetEntityId": "forex-USD"
+    },
+    "decimals": 8,
+    "maxSubmissionValue": "95780971304118053647396689196894323976171195136475135"
+  },
+  {
+    "compareOffchain": "",
+    "contractAddress": "0xF648D8F0ed894c99A12de5Df3020Cd273e841Bd4",
+    "contractType": "",
+    "contractVersion": 6,
+    "decimalPlaces": null,
+    "ens": "eth-usd",
+    "formatDecimalPlaces": null,
+    "healthPrice": "",
+    "heartbeat": 86400,
+    "history": null,
+    "multiply": "100000000",
+    "name": "ETH / USD",
+    "pair": [
+      "",
+      ""
+    ],
+    "path": "eth-usd",
+    "proxyAddress": "0x5c8c8482f064049248F86D9F4aFa4B1f2F5b6d31",
+    "threshold": 0.5,
+    "valuePrefix": "",
+    "assetName": "",
+    "feedCategory": "",
+    "feedType": "",
+    "docs": {
+      "baseAssetEntityId": "crypto-ETH",
+      "hidden": true,
+      "quoteAssetEntityId": "forex-USD"
+    },
+    "decimals": 8,
+    "maxSubmissionValue": "95780971304118053647396689196894323976171195136475135"
+  }
+]

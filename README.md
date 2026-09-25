@@ -1,12 +1,12 @@
 <p align="center">
-  <a href="https://latch.guru">
+  <a href="https://latches.fun">
     <img src="https://raw.githubusercontent.com/Latch-Protocol-Team/latch-sdk/main/assets/og.png"
          alt="Latch Protocol — hooks for a bigger ecosystem" width="640">
   </a>
 </p>
 
 <p align="center">
-  <a href="https://latch.guru">Website</a> ·
+  <a href="https://latches.fun">Website</a> ·
   <a href="https://www.npmjs.com/package/@latchprotocol/sdk">npm</a> ·
   <a href="https://github.com/Latch-Protocol-Team">GitHub</a> ·
   <a href="https://x.com/Ox_Forged">Developer on X</a>
@@ -20,9 +20,22 @@
 
 # @latchprotocol/sdk
 
-TypeScript SDK for **LatchProtocol** — a singleton AMM with hooks, deployed on chains where Uniswap v4 is not.
+TypeScript SDK for **LatchProtocol** — a hooks platform on its own Infinity-architecture core (Vault, CL and Bin pool managers), deployed and verified per chain so launchpads and DEXes can ship on it without deploying an AMM.
 
-The SDK gives you the protocol's domain types (pool keys, pool ids, currencies, balance deltas, fees), first-class helpers for the **hook permission bitmap**, typed definitions for every event the contracts emit, and an indexer data model for analytics.
+The SDK gives you the protocol's domain types (pool keys, pool ids, currencies, balance deltas, fees), first-class helpers for the **hook permission bitmap**, typed definitions for every event the contracts emit, the **market** reads a token page needs (trades, candles, holders, the pool directory — from logs and `getSlot0`, never USD), the **pads** helpers (a transferable launchpad tenant with an on-chain brand), and an indexer data model for analytics.
+
+It also carries the modules the rest of the product is built from, and they are all MIT:
+
+| Module | What it does |
+|---|---|
+| `launchpad/` | Build and validate a launch: presets, CL ranges and Bin shapes, the creator tax, tenant terms, the pads |
+| `price/` | Resolve a native/USD price in tiers — Chainlink on chain, then Pyth, then a Latch pool — and turn it into a market cap. Every answer carries its provenance, and "no source" is a first-class answer rather than a zero |
+| `lock/`, `drop/`, `split/`, `utilities/` | Liquidity locks, token locks and vesting, Merkle airdrops, multisend, team splits, and the shared fee gate in front of them |
+| `rwa/` | Tokenised equities: the verified feed table, and the exact `configureFeed` / `configureMarket` arguments a banded stock pool needs |
+| `trading/` | Routing and fills, including the router that can fill on a third-party venue |
+| `registry/`, `trust/` | What the on-chain registry says about a Latch, and how to render it without ever implying it is an audit |
+| `tokenlists/` | The Latch token list in the standard schema, merged and verified |
+| `chains/` | Probed public endpoints per chain, a failover transport, and the contract-clock reader — because on some chains `block.number` inside the EVM is not the block number the RPC reports |
 
 ---
 
@@ -72,9 +85,28 @@ const params = buildLaunchParams({
   preset: "FairLaunch", seed, startDelaySeconds: 3600,
 })
 
-// 3. Every objection, before a wallet is opened. blockTimeCentis comes off the kit.
-const issues = validateLaunchParams(params, { blockTimeCentis, maxDecayBlocks, maxStartDelayBlocks })
-console.log(describeLaunch(params, { blockTimeCentis }).decayWindow)   // "5m", not "3000 blocks"
+// 3. Every objection, before a wallet is opened. blockTimeCentis comes off the kit;
+//    contractBlockTimeCentis is the chain's REAL block.number cadence, from the address book.
+const { contractBlockTimeCentis } = LATCH_DEPLOYMENTS[4663]
+const limits = { blockTimeCentis, contractBlockTimeCentis, maxDecayBlocks, maxStartDelayBlocks }
+const issues = validateLaunchParams(params, limits)
+console.log(describeLaunch(params, limits).decayWindow)
+// On the live Robinhood kit: "10h", with declaredDecayWindow "5m" and clockStretch 120.
+```
+
+### Two block clocks
+
+On an Arbitrum Nitro chain — Robinhood Chain is one — `block.number` inside the EVM is
+Ethereum's block number (~12 s), while `eth_blockNumber` is the L2 block (~0.1 s). Every block
+number a Latch contract stores (`effectiveBlock`, `expiryBlock`, `startBlock`) is on the EVM
+clock. Compare them against `readContractBlockNumber(client, chainId)`, never against
+`getBlockNumber()`, and convert block counts to time with `contractBlocksToSeconds`. Keep
+`getBlockNumber()` for `eth_getLogs` ranges, which are L2.
+
+```ts
+const clock = await readContractClock(publicClient, 4663)
+clock.contractBlockNumber   // ~26M, what the hook compares against
+clock.rpcBlockNumber        // ~62M, the log clock
 ```
 
 ### Three traps these close
@@ -100,12 +132,139 @@ all-zero Custom as an error rather than a default.
 `MAX_DECAY_BLOCKS` and `MAX_START_DELAY` are immutables set per deployment from the chain's
 real block time — read them off the hook and pass them in. Hardcoding them is the twelve-second
 assumption that made them immutable in the first place. Likewise `blockTimeCentis`: read it
-from the kit. Robinhood's is `10` (0.10s per block), and on a chain that fast a duration
-written for 12-second blocks is off by more than two orders of magnitude.
+from the kit — it is what the kit USES, not what the chain does. Robinhood's live kit declares
+`10` (0.10 s), but its hook's `block.number` advances every ~12 s, so every window it resolves
+runs 120x longer than the seconds it was given. `contractBlockTimeCentis` is the real figure.
 
 `PRESET_PARAMS` mirrors the Solidity so a UI can render a schedule without an RPC call, and a
 test reads `LaunchPresets.sol` and asserts every field. The chain is still the authority:
 call `previewSchedule` on the deployed kit before you broadcast.
+
+---
+
+## Market data
+
+`packages/sdk/src/market` reads everything a token or pool page shows from the chain alone, and
+labels where each number came from so a page can print it. **Nothing is priced in dollars.** Every
+price is quote per whole base token, every volume is in the quote currency.
+
+| Figure | Source |
+|---|---|
+| trades | the pool manager's `Swap` logs for the pool id (CL or Bin) — `readPoolTrades` |
+| price after each trade | the pool's own price in the log (`sqrtPriceX96` on CL, `activeId` on Bin), oriented by `priceFromSqrt` / `priceFromBinId` |
+| spot | `getSlot0` — `readSpotPrice` |
+| volume | the quote-side amount of every swap, absolute, summed — `marketStats` |
+| candles | `buildCandles(trades, bucketSeconds)`; **a bucket with no trade is not emitted** |
+| holders | the token's `Transfer` logs since its launch block, reduced to balances — `readHolders` |
+| pool directory | both managers' `Initialize` logs with the full key — `readPoolDirectory` |
+
+```ts
+import {
+  readPoolTrades, withTimestamps, buildCandles, marketStats, readSpotPrice, readHolders, readPoolDirectory,
+  type MarketPool,
+} from "@latchprotocol/sdk"
+
+// Orientation is explicit. `baseIsCurrency0` says which currency is the launch token; both
+// decimals are required. A wrong decimals value is a 10^12 mispricing, not a display bug.
+const pool: MarketPool = { poolId, kind: "CL", key, baseIsCurrency0: true, baseDecimals: 18, quoteDecimals: 6 }
+
+const raw = await readPoolTrades(client, pool, { fromBlock: launchBlock })  // one eth_getLogs
+const trades = await withTimestamps(client, raw)                             // one header per distinct block
+const spot = await readSpotPrice(client, pool)                               // quote per base, now
+
+const candles = buildCandles(trades, 300)             // 5-minute OHLC, gaps left as gaps
+const day = marketStats(trades, now - 86_400)         // trades, buys, sells, volumeQuote, first, last, change
+const holders = await readHolders(client, token, { fromBlock: launchBlock, totalSupply })
+holders.fromBlock                                     // what "since block N" on a page means
+
+// Every pool the chain's Latch managers opened since a block: the directory a DEX front routes through.
+const listings = await readPoolDirectory(client, { clPoolManager, binPoolManager }, { fromBlock: deployedAtBlock })
+```
+
+Swap deltas follow the Vault's convention: a negative amount was paid by the trader, a positive one
+received; `side` is judged from the base token's delta. `Trade.sender` is the pool manager's caller
+(a router), never the end user. `readHolders` lists the Vault and the lockers because they hold —
+label them, do not hide them.
+
+---
+
+## Pads: a launchpad or DEX somebody else runs
+
+A **pad** is one `LatchPad` contract, cloned by `LatchPadFactory.createPad` and made a
+`LaunchpadKitV2` tenant in the same transaction. The pad *is* the tenant (every launch names it),
+its owner configures it, and ownership moves two-step. The pad holds nothing: the kit and the
+lockers credit the integrator wallet the owner names, and `configure` refuses the pad itself.
+
+Two things live on a pad and they are not alike:
+
+- **Terms** (`TenantConfig`) are stored on the kit and **enforced on every launch that names the
+  pad**: integrator, `integratorBps` (≤ the lockers' `maxIntegratorBps`), `integratorLaunchFeeWei`
+  (≤ the kit's `maxIntegratorLaunchFeeWei`), allowed presets, allowed Bin shapes, `restrictQuotes`,
+  `active`. `PadTerms` spells them in names; `tenantConfigFromTerms` turns them into the struct.
+- **The brand** (`PadBrand`) is the pad's `metadataURI`, stored inline as a `data:application/json`
+  URI of at most `PAD_MAX_METADATA_URI_BYTES` (4,096) bytes: tagline, logo URL, accent, one of
+  `PAD_THEMES`, links, `kind` (`launchpad` | `dex` | `both`), `dex: { enabled, feeBps, scope }` and
+  `customDomain`. **Nothing in the brand is enforced by any contract.** `dex.feeBps`
+  (≤ `PAD_MAX_DEX_FEE_BPS`, 100) is a request to whichever front end hosts the pad.
+
+```ts
+import {
+  encodeCreatePad, encodeSetPadMetadata, encodeConfigurePad,
+  readPad, readPads, padKindOf, padDexScopeOf, padHostnameOf, validatePadBrand,
+  type PadBrand, type PadTerms,
+} from "@latchprotocol/sdk"
+
+const brand: PadBrand = {
+  v: 1,
+  tagline: "Launches for the Mochi community",
+  theme: "frost",
+  accent: "#1f9e89",
+  kind: "both",
+  dex: { enabled: true, feeBps: 25, scope: "all" },   // a request to the hosting front end
+  customDomain: "launch.mochi.xyz",                    // the owner's half of the domain proof
+}
+validatePadBrand(brand)   // [] — every objection, cheapest first; encode throws on any
+
+const terms: PadTerms = {
+  integrator: feeWallet,        // never the pad
+  integratorBps: 500,
+  integratorLaunchFeeWei: 0n,
+  allowedPresets: [],           // [] means every preset
+  allowedBinShapes: [],         // [] FORBIDS Bin legs
+  restrictQuotes: false,
+  active: true,
+}
+
+// One transaction to LatchPadFactory, paying its flat site fee; the owner is msg.sender.
+// `readPadFactoryFee` reads padFeeWei / pendingPadFee / maxPadFeeWei / padFeeNoticeSeconds /
+// protocolFeeRecipient; `buildCreatePad` sends `padSafeValue(fee)` (the higher of the fee in force
+// and an announced increase) and the factory refunds the difference in the same call.
+const fee = await readPadFactoryFee(client, factoryAddress)
+const create = buildCreatePad({ factory: factoryAddress, name: "Mochi Pad", brand, terms, fee }) // { to, data, value }
+
+// Later, from the owner: rename / re-brand, or change the terms.
+const rebrand = encodeSetPadMetadata("Mochi Pad", { ...brand, tagline: "Now with Bin launches" })
+const retune = encodeConfigurePad({ ...terms, integratorBps: 300 })
+
+// Reads. `metadata.kind` is brand | remote | empty | invalid — never a default brand.
+const pad = await readPad(client, padAddress)
+const b = pad.metadata.kind === "brand" ? pad.metadata.brand : null
+padKindOf(b)        // "launchpad" when absent
+padDexScopeOf(b)    // "launches" when absent
+padHostnameOf(b)    // a valid hostname or null
+pad.tenant.configured   // false when the kit never stored terms for it
+
+const all = await readPads(client, factoryAddress)   // padCount / pads(start, end); no log scan
+```
+
+`readPad` returns the kit's stored terms decoded (`tenant`), the pending owner, and the brand as
+one of four states. A `remote` brand (`ipfs://`, `https://`) is returned as a URL for the caller to
+fetch and run through `validatePadBrand`; the SDK does not fetch.
+
+Read `LatchDeployment.launchpadV2.padFactory` for the chain you are on: an address means the
+factory is there, `null` means it is coming soon on that chain. The helpers also encode and read
+against a factory you name, so they work either way — and reading the address book is the right
+check in code, because a sentence in a README goes stale the day something ships.
 
 ---
 
@@ -408,45 +567,46 @@ Relationships are explicit throughout: a `Swap` points at a `Pool`, a `Pool` poi
 
 ## Package layout
 
+`src/` is the whole public surface; everything here is MIT and independently authored.
+
 ```
 packages/sdk/
 ├── LICENSE                       MIT
 ├── README.md
 ├── schema.graphql                indexer schema (GraphQL / subgraph dialect)
-├── package.json
-├── tsconfig.json                 strict; used for typecheck + tests
-├── tsconfig.build.json           emits dist/ from src/ only
-├── vitest.config.ts
-├── scripts/
-│   └── generate-events.mjs       ABI -> TypeScript generator
+├── scripts/                      ABI -> TypeScript generators, the RPC probe,
+│                                 and the mirror that writes the public repo
 ├── src/
 │   ├── index.ts                  public entry point
-│   ├── generated/                DO NOT EDIT - produced by the generator
-│   │   ├── abi.ts                event fragments per contract
-│   │   └── events.ts             arg interfaces, topics, descriptors, union
-│   ├── types/
-│   │   ├── currency.ts           Currency, native sentinel, sorting
-│   │   ├── parameters.ts         the bytes32 parameters codec
-│   │   ├── poolKey.ts            PoolKey, PoolId, key builders
-│   │   ├── balanceDelta.ts       packed int128 pair
-│   │   └── fee.ts                LP fee, dynamic-fee marker, protocol fee
-│   ├── deployments/
-│   │   └── index.ts              THE address book — every chain, every contract,
-│   │                             token decimals; `null` = not deployed
-│   ├── chains/
-│   │   ├── endpoints.ts          probed public RPC endpoints per chain
-│   │   └── transport.ts          viem failover transport built from them
-│   ├── hooks/
-│   │   └── bitmap.ts             flag tables, encode/decode/validate
-│   ├── events/
-│   │   └── index.ts              topic index and log decoding
-│   └── indexer/
-│       ├── entities.ts           TS mirror of schema.graphql
-│       └── index.ts              id builders and mapping helpers
-└── test/
-    ├── bitmap.test.ts
-    ├── deployments.test.ts
-    └── events.test.ts
+│   ├── ipfs.ts                   metadata URIs, and what a gateway may not be trusted for
+│   ├── types/                    Currency, PoolKey, PoolId, the bytes32 parameters
+│   │                             codec, packed balance deltas, LP and protocol fees
+│   ├── deployments/              THE address book — every chain, every contract,
+│   │                             `null` means not deployed; plus the Safe contracts,
+│   │                             the verified stock feeds and the native/USD feeds
+│   ├── chains/                   probed endpoints, a failover transport, and the
+│   │                             contract clock (see "Two block clocks" above)
+│   ├── hooks/                    permission bitmap: flag tables, encode/decode/validate
+│   ├── events/                   topic index and log decoding
+│   ├── generated/                DO NOT EDIT — produced by the generators
+│   ├── launchpad/                launches, presets, CL ranges and Bin shapes, the
+│   │                             creator tax, tenant terms, kit v2 and the pads
+│   ├── price/                    native/USD in tiers (Chainlink, Pyth, a Latch pool),
+│   │                             market cap, and the provenance of each answer
+│   ├── market/                   trades, candles, holders, the pool directory, spot
+│   ├── lock/                     liquidity locks and token locks / vesting
+│   ├── drop/                     Merkle airdrops and multisend
+│   ├── split/                    team splits
+│   ├── utilities/                the shared fee gate in front of those four
+│   ├── rwa/                      market hours, price bands, stock pair coverage
+│   ├── trading/                  routing and fills
+│   ├── registry/                 what the registry records about a Latch
+│   ├── trust/                    reading a listing honestly — never "this is safe"
+│   ├── revshare/                 revenue-share config, including a pending proposal
+│   ├── tokenlists/               the token list, merged and verified
+│   ├── safe/                     Safe addresses and derivation
+│   └── indexer/                  TS mirror of schema.graphql, id builders
+└── test/                         41 suites, run with vitest
 ```
 
 ---
@@ -495,7 +655,7 @@ The bitmap offsets, the `parameters` layout and the dependency rules were read f
 
 | | |
 |---|---|
-| Website | <https://latch.guru> |
+| Website | <https://latches.fun> |
 | Package | <https://www.npmjs.com/package/@latchprotocol/sdk> |
 | Source | <https://github.com/Latch-Protocol-Team/latch-sdk> |
 | Org | <https://github.com/Latch-Protocol-Team> |

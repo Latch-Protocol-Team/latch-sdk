@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 /**
  * Emits the ABIs a DEX front end encodes calldata against: the router, the
- * quoter and the position manager.
+ * quoters and both position managers.
  *
  * WHY THIS EXISTS. Until now the SDK shipped an address book that named
  * `universalRouter`, `clQuoter` and `clPositionManager`, and no way to call any
@@ -74,7 +74,11 @@ const SOURCES = [
       "`CLQuoter` — simulated swap output. Every function here REVERTS with the answer " +
       "encoded in the revert data, so these are `eth_call`-only and cost gas if sent.",
     contract: "CLQuoter",
-    artifact: join(REPO_PACKAGES, "periphery", "foundry-out", "lens", "CLQuoter.sol", "CLQuoter.json"),
+    /* NOT `foundry-out/lens/CLQuoter.sol/...`. That path exists in older local
+       trees as a stale artifact Foundry never deleted; a clean build of
+       src/pool-cl/lens/CLQuoter.sol writes it here. CI builds clean, so a
+       stale path fails the `generated-abis` job instead of reading a dead file. */
+    artifact: join(REPO_PACKAGES, "periphery", "foundry-out", "CLQuoter.sol", "CLQuoter.json"),
     keep: {
       function: [
         "quoteExactInputSingle",
@@ -86,6 +90,28 @@ const SOURCES = [
         "vault",
       ],
       event: [], // a lens emits nothing
+      error: null,
+    },
+  },
+  {
+    constant: "BIN_QUOTER_ABI",
+    doc:
+      "`BinQuoter` — simulated swap output for liquidity-book pools. Same `QuoteExactSingleParams` " +
+      "shape as the CL quoter (`zeroForOne` is `swapForY`), same revert-with-the-answer mechanics: " +
+      "`eth_call`-only.",
+    contract: "BinQuoter",
+    artifact: join(REPO_PACKAGES, "periphery", "foundry-out", "BinQuoter.sol", "BinQuoter.json"),
+    keep: {
+      function: [
+        "quoteExactInputSingle",
+        "quoteExactOutputSingle",
+        "quoteExactInput",
+        "quoteExactOutput",
+        "quoteExactInputSingleList",
+        "poolManager",
+        "vault",
+      ],
+      event: [],
       error: null,
     },
   },
@@ -130,6 +156,43 @@ const SOURCES = [
          hands and how `ownerOf` is reconstructed from logs; `MintPosition` and
          `ModifyLiquidity` are the position's own history. */
       event: ["Transfer", "Approval", "ApprovalForAll", "MintPosition", "ModifyLiquidity"],
+      error: null,
+    },
+  },
+  {
+    constant: "BIN_POSITION_MANAGER_ABI",
+    doc:
+      "`BinPositionManager` — liquidity-book positions as per-bin fungible shares (ERC-1155-like, " +
+      "no `uri` and no receiver callback). `modifyLiquidities` takes the same encoded action plan; " +
+      "`initializePool` opens a pool at a bin id; the reads are what a positions screen needs.",
+    contract: "BinPositionManager",
+    artifact: join(
+      REPO_PACKAGES,
+      "periphery",
+      "foundry-out",
+      "BinPositionManager.sol",
+      "BinPositionManager.json",
+    ),
+    keep: {
+      function: [
+        "modifyLiquidities",
+        "modifyLiquiditiesWithoutLock",
+        "initializePool",
+        "positions",
+        "balanceOf",
+        "balanceOfBatch",
+        "totalSupply",
+        "approveForAll",
+        "isApprovedForAll",
+        "batchTransferFrom",
+        "permit2",
+        "binPoolManager",
+        "vault",
+        "WETH9",
+      ],
+      /* `TransferBatch` is the only transfer event: mints, burns and transfers
+         all emit it, so a holder's bins are reconstructed from it. */
+      event: ["TransferBatch", "ApprovalForAll"],
       error: null,
     },
   },

@@ -10,7 +10,7 @@
    CUSTOM IS THE ZERO VALUE. That is the trap this module exists to close. An
    unset form field, a missing property, a `?? 0` default, a struct built from
    `{}` — every one of those means `Preset.Custom`, and Custom then reads
-   `initialFeeBips`, `finalFeeBips`, `decayBlocks` and `enabled` from fields a
+   `initialFeeBips`, `finalFeeBips`, `decaySeconds` and `enabled` from fields a
    preset-driven UI never filled in. The kit does not reject it. You get a
    launch with no anti-sniper protection and no error anywhere.
 
@@ -25,8 +25,15 @@
    this file is wrong — never the other way round.
 
    The authority at runtime is still the chain: `previewSchedule(params)` on
-   the deployed kit resolves the preset with the kit's own block time. Use it
+   the deployed kit resolves the preset exactly as a launch would. Use it
    before broadcasting. This table is for rendering, not for deciding.
+
+   TWO KIT GENERATIONS. The timestamp kit (Option B, 2026-09-13) writes these
+   seconds to the hook unconverted. The block-numbered kit still deployed on
+   Robinhood converts them to blocks at its declared `blockTimeCentis` (10),
+   and the hook then waits those blocks on the real ~12 s contract clock, so
+   the same preset runs ~120x long there. Which kit a deployment points at is
+   `LatchDeployment.durationClocks.launchpadKit`; `describeLaunch` takes it.
    ============================================================================ */
 
 /**
@@ -55,11 +62,11 @@ export const PRESET_NAMES = Object.keys(PRESET) as readonly PresetName[];
 
 /** The parameters a preset fixes. Mirrors `struct PresetParams`. */
 export interface PresetParams {
-  /** LP fee at the first block of the window, in pips (1e6 == 100%). */
+  /** LP fee at the start of the window, in pips (1e6 == 100%). */
   readonly initialFeeBips: number;
   /** LP fee once the window has elapsed, in pips. */
   readonly finalFeeBips: number;
-  /** Length of the decay window IN SECONDS. The kit converts to blocks. */
+  /** Length of the decay window IN SECONDS. A timestamp kit writes it as-is; a block kit converts. */
   readonly windowSeconds: number;
   /** When false the hook applies no gate and pins the fee at `finalFeeBips`. */
   readonly enabled: boolean;
@@ -107,13 +114,15 @@ export const PRESET_PARAMS: Readonly<Record<Exclude<PresetName, "Custom">, Prese
     enabled: true,
     requiresMaxBuyPerTx: false,
     doesNotProtectAgainst:
-      "observation. The pool, the config and the exact startBlock are public the moment the " +
-      "transaction lands; a bot reading the chain knows your open block before you announce it.",
+      "observation. The pool, the config and the exact start time are public the moment the " +
+      "transaction lands; a bot reading the chain knows your open before you announce it.",
   },
   NoTax: {
     initialFeeBips: 3_000,
     finalFeeBips: 3_000,
-    windowSeconds: 1,
+    /* The hook's MIN_DECAY_SECONDS. Irrelevant to the fee: the schedule is flat
+       and disabled, but the timestamp hook validates every config against it. */
+    windowSeconds: 60,
     enabled: false,
     requiresMaxBuyPerTx: false,
     doesNotProtectAgainst: "anything. It is a plain 0.30% pool with a hook attached.",
@@ -124,10 +133,10 @@ export const PRESET_PARAMS: Readonly<Record<Exclude<PresetName, "Custom">, Prese
  * Hard caps enforced by `LaunchGuardHook._validateConfig`, for pre-flighting a
  * `Custom` preset locally instead of paying for a reverted estimate.
  *
- * `MAX_DECAY_BLOCKS` and `MAX_START_DELAY` are NOT here — they are immutables
- * set per deployment from the chain's real block time, so read them off the
- * hook. Hardcoding them is the exact 12-second assumption that made them
- * immutable in the first place.
+ * The three `*_SECONDS` bounds are CONSTANTS on the timestamp hook and are
+ * mirrored here with a parity test against the Solidity. They do NOT describe the
+ * block-numbered hook still deployed on Robinhood, whose `MAX_DECAY_BLOCKS` and
+ * `MAX_START_DELAY` are per-deployment immutables: read those off that hook.
  */
 export const LAUNCH_GUARD_LIMITS = {
   /** 50%. `initialFeeBips` may not exceed this. */
@@ -136,6 +145,12 @@ export const LAUNCH_GUARD_LIMITS = {
   MAX_FINAL_FEE: 100_000,
   /** Pips denominator, matching core. */
   PIPS: 1_000_000,
+  /** Timestamp hook: shortest decay window, seconds. Sized against sequencer clock skew. */
+  MIN_DECAY_SECONDS: 60,
+  /** Timestamp hook: longest decay window, seconds (30 days). */
+  MAX_DECAY_SECONDS: 2_592_000,
+  /** Timestamp hook: furthest a start may be scheduled, seconds (30 days). */
+  MAX_START_DELAY_SECONDS: 2_592_000,
 } as const;
 
 /**
@@ -170,17 +185,21 @@ export function presetName(value: number): PresetName {
 }
 
 /**
- * `LaunchPresets.secondsToBlocks`, to the block.
+ * `LaunchPresets.secondsToBlocks` of the BLOCK-NUMBERED kit, to the block.
+ * The timestamp kit has no such conversion; this exists to describe the
+ * deployed block kit truthfully.
  *
- * Rounds UP, and floors at 1, exactly as the Solidity does — a window rounded
+ * Rounds UP, and floors at 1, exactly as that Solidity did — a window rounded
  * down to zero blocks is rejected by the hook, so the safe direction is one
  * block too many.
  *
- * @param blockTimeCentis Block time in HUNDREDTHS of a second. Read it from
- * the deployed kit (`blockTimeCentis()`), do not assume: Robinhood Chain's kit
- * is configured at 10 (0.10s), while a 12-second chain would be 1200. This
- * single number is the difference between a three-day launch and a
- * thirty-five-minute one.
+ * @param blockTimeCentis Block time in HUNDREDTHS of a second. To reproduce
+ * what a deployed kit will compute, pass the kit's own `blockTimeCentis()`. To
+ * learn how long those blocks REALLY last, convert back with the chain's
+ * `contractBlockTimeCentis` (see `chains/clock`), not with the same number:
+ * the live Robinhood kit declares 10 (0.1 s) but the hook's `block.number` is
+ * Ethereum's and advances every ~12 s, so its windows run 120x longer than the
+ * seconds they came from.
  */
 export function secondsToBlocks(secondsValue: number | bigint, blockTimeCentis: number | bigint): bigint {
   const s = BigInt(secondsValue);
@@ -191,7 +210,11 @@ export function secondsToBlocks(secondsValue: number | bigint, blockTimeCentis: 
   return blocks === 0n ? 1n : blocks;
 }
 
-/** Inverse of {@link secondsToBlocks}, for turning a block count into wall clock. */
+/**
+ * Inverse of {@link secondsToBlocks}. Real wall clock only when
+ * `blockTimeCentis` is the chain's REAL contract cadence
+ * (`contractBlockTimeCentis`), not a contract's declared one.
+ */
 export function blocksToSeconds(blocks: number | bigint, blockTimeCentis: number | bigint): number {
   const b = BigInt(blocks);
   const centis = BigInt(blockTimeCentis);
@@ -200,9 +223,9 @@ export function blocksToSeconds(blocks: number | bigint, blockTimeCentis: number
 }
 
 /**
- * A duration in words. Exists because "1000000 blocks" tells a reviewer
- * nothing and "28 hours" tells them everything — and on a 0.102s chain those
- * are the same quantity.
+ * A duration in words. Exists because "26000000 blocks" tells a reviewer
+ * nothing and "3611d" (9.9 years) tells them everything — and on Robinhood, where a
+ * contract block is ~12 s, those are the same quantity.
  */
 export function humanDuration(totalSeconds: number): string {
   if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return "unknown";
