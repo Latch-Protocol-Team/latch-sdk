@@ -4,7 +4,7 @@
  *
  * WHY THIS EXISTS, AND WHY IT IS ITS OWN FILE WITH NO I/O
  * -------------------------------------------------------
- * The launch wizard is market-cap-first (CLAUDE.md, owner decision 2026-09-20): a creator
+ * The launch wizard is market-cap-first (owner decision 2026-09-20): a creator
  * says "$3,500" and the kit needs a price per token. The creator trap the decision names is
  * arithmetic, not UX — "a 5 ETH cap on a 1e9 supply means typing `0.000000005`. One zero out
  * is 10x, permanent, and the LP is locked forever." A function that gets that conversion
@@ -23,7 +23,7 @@
  *
  *   ETH quote, 18-decimal token, price 5_000_000_000n
  *     = 5e9 wei per whole token
- *     = 0.000000005 ETH per token, the exact figure CLAUDE.md warns creators mistype.
+ *     = 0.000000005 ETH per token, the exact figure creators mistype.
  *
  * It is deliberately NOT "whole quote per whole token" (that is a decimal and this file
  * has none) and NOT "raw quote per raw token" (that loses all precision the moment the two

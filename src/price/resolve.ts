@@ -10,7 +10,7 @@
  *
  * THE ONE RULE THE WHOLE FILE EXISTS TO ENFORCE: there is no fifth branch. If no tier
  * answers, the result is `{ ok: false }` with a reason — never a zero, never a cached
- * number, never a figure from another chain. CLAUDE.md's no-invented-data rule is the
+ * number, never a figure from another chain. Latch's no-invented-data rule is the
  * reason, and the specific failure it is written against is "a number that looks real and
  * is not poisons that judgement, and the reader has no way to tell which numbers to
  * discount". A dollar figure on a launch screen is exactly that number.

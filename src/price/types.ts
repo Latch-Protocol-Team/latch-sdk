@@ -2,7 +2,7 @@
 /**
  * What a native/USD answer IS, including where it came from.
  *
- * PROVENANCE IS PART OF THE VALUE, NOT A COMMENT. CLAUDE.md's no-invented-data rule says
+ * PROVENANCE IS PART OF THE VALUE, NOT A COMMENT. Latch's no-invented-data rule says
  * "Label the provenance" and the reason is specific: this number turns into a dollar figure
  * a creator reads while choosing an opening market cap for a pool whose LP will be locked
  * forever. A reader who cannot tell which oracle said it, at which address, at which block,

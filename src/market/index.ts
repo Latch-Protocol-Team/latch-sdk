@@ -12,7 +12,7 @@
 
    NOTHING HERE IS PRICED IN DOLLARS. Every price is "quote per launch token"
    and every volume is in the quote currency; a pad that wants a dollar figure
-   needs a price for the quote it can defend (CLAUDE.md, "No invented data").
+   needs a price for the quote it can defend (the no-invented-data rule).
 
    Swap deltas follow the vault's convention: a NEGATIVE amount was paid by the
    trader, a POSITIVE one received. `side` is judged from the launch token's

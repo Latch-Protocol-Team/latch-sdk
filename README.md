@@ -55,6 +55,11 @@ You can build a hook, an indexer or a front end on this SDK under MIT terms. Dep
 
 ## Launching a token
 
+> This section documents the block-numbered v1 `LaunchpadKit`. No mainnet in the address book
+> carries one now (Robinhood's was retired with its first stack on 2026-09-27), so
+> `requireContract(d, "launchpadKit")` throws there; current launches go through Kit v2
+> (`launchpadV2.launchpadKitV2`).
+
 `LaunchpadKit.createLaunch` does the whole launch in one transaction — pool, anti-sniper fee
 schedule, seeded liquidity, registry listing. The SDK ships the three things that call needs
 and that are dangerous to hand-roll.
@@ -91,7 +96,7 @@ const { contractBlockTimeCentis } = LATCH_DEPLOYMENTS[4663]
 const limits = { blockTimeCentis, contractBlockTimeCentis, maxDecayBlocks, maxStartDelayBlocks }
 const issues = validateLaunchParams(params, limits)
 console.log(describeLaunch(params, limits).decayWindow)
-// On the live Robinhood kit: "10h", with declaredDecayWindow "5m" and clockStretch 120.
+// On Robinhood's retired v1 kit this read "10h", with declaredDecayWindow "5m" and clockStretch 120.
 ```
 
 ### Two block clocks
@@ -132,9 +137,9 @@ all-zero Custom as an error rather than a default.
 `MAX_DECAY_BLOCKS` and `MAX_START_DELAY` are immutables set per deployment from the chain's
 real block time — read them off the hook and pass them in. Hardcoding them is the twelve-second
 assumption that made them immutable in the first place. Likewise `blockTimeCentis`: read it
-from the kit — it is what the kit USES, not what the chain does. Robinhood's live kit declares
-`10` (0.10 s), but its hook's `block.number` advances every ~12 s, so every window it resolves
-runs 120x longer than the seconds it was given. `contractBlockTimeCentis` is the real figure.
+from the kit — it is what the kit USES, not what the chain does. Robinhood's retired v1 kit
+declared `10` (0.10 s), but its hook's `block.number` advanced every ~12 s, so every window it
+resolved ran 120x longer than the seconds it was given. `contractBlockTimeCentis` is the real figure.
 
 `PRESET_PARAMS` mirrors the Solidity so a UI can render a schedule without an RPC call, and a
 test reads `LaunchPresets.sol` and asserts every field. The chain is still the authority:
@@ -316,7 +321,7 @@ import { LATCH_DEPLOYMENTS, getDeployment, tokenBySymbol } from "@latchprotocol/
 // import { ... } from "@latchprotocol/sdk/deployments";
 
 const latch = LATCH_DEPLOYMENTS[4663];      // Robinhood Chain
-latch.vault;                                 // 0x78e8359c6D34Df797b8A793dE8c7c6bffA97fB6c
+latch.vault;                                 // 0xaC44C903CE3d89054fD5b70e0E396f26b214CBE3
 latch.clPoolManager;
 latch.universalRouter;
 latch.deployedAtBlock;                       // start log scans here, not at genesis
@@ -326,13 +331,12 @@ getDeployment(999);                          // undefined — Latch is not on Hy
 
 | Chain | id | Status |
 | --- | --- | --- |
-| Robinhood Chain | `4663` | mainnet, 18 contracts verified on Sourcify |
+| Robinhood Chain | `4663` | mainnet |
 | Ethereum Sepolia | `11155111` | testnet |
 
 **`null` means not deployed. It is never the zero address.** A contract Latch has not shipped on a
-chain — the launchpad contracts on Sepolia, the pool-manager owner wrappers there — reads `null`,
-so the compiler makes you handle it. (The launchpad IS deployed on Robinhood as of 2026-09-12;
-this example is about the shape, not that chain.) A zero
+chain — the v1 launchpad on every mainnet, the pool-manager owner wrappers on Sepolia — reads
+`null`, so the compiler makes you handle it. A zero
 address would not: it is a value `readContract` accepts and answers with silence.
 
 ```ts

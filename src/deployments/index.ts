@@ -89,8 +89,8 @@
    (not `Address | null`) must be present. A chain is not addable half-way.
    `vault`, `clPoolManager`, `binPoolManager`, `feeController`, `registry`,
    `universalRouter`, both position managers, both quoters, the descriptor,
-   `create3Factory`, `permit2`, `weth`, `revShareHook`, both timelocks and
-   `deployedAtBlock` are all required, because a consumer branching on `null`
+   `create3Factory`, `permit2`, `weth`, `revShareHook`, the custody timelock and
+   `deployedAtBlock` are all required (the policy timelock is not: Base has none), because a consumer branching on `null`
    for those was never written. So a new chain enters this table when its core
    is deployed and read back, and not one commit earlier. There is no
    placeholder to pre-stage and no zero address to fill in.
@@ -200,8 +200,13 @@ export interface RevShareHookRecord {
   readonly address: Address;
   readonly durationClock: DurationClock;
   readonly pendingShape: RevSharePendingShape;
-  /** `current` is the one `LatchDeployment.revShareHook` names. Exactly one per chain. */
-  readonly status: "current" | "retired";
+  /**
+   * `current` is the one `LatchDeployment.revShareHook` names. Exactly one per chain.
+   * `live` is a deployed, serviceable hook that is not (yet) the one `revShareHook` names —
+   * e.g. a redeploy whose consumers have not migrated. `retired` is superseded but still hosts
+   * whatever pools were bound to it.
+   */
+  readonly status: "current" | "live" | "retired";
   /** Why it is here. Pools bound to a retired hook still exist and still trade. */
   readonly note: string;
 }
@@ -210,26 +215,6 @@ export interface NativeCurrency {
   readonly name: string;
   readonly symbol: string;
   readonly decimals: number;
-}
-
-/**
- * A real pool created by this repo's own exercise scripts and driven end to end.
- *
- * Present so an integrator has something concrete to read against on day one.
- * It is a REFERENCE, never a default: a chain without one carries `null`, and a
- * caller must handle that rather than fall through to another chain's pool.
- * Showing a Sepolia pool under a mainnet header is the same class of error as
- * inventing the number outright.
- */
-export interface ReferencePool {
-  readonly id: `0x${string}`;
-  readonly token0: Address;
-  readonly token1: Address;
-  readonly symbol0: string;
-  readonly symbol1: string;
-  /** LP fee in pips of 1_000_000. 3000 = 0.30%. */
-  readonly lpFee: number;
-  readonly tickSpacing: number;
 }
 
 /**
@@ -266,17 +251,6 @@ export interface LaunchpadV2Deployment {
   readonly padFactory: Address | null;
 }
 
-/** The not-deployed value of {@link LaunchpadV2Deployment}. */
-const LAUNCHPAD_V2_NOT_DEPLOYED: LaunchpadV2Deployment = {
-  launchpadKitV2: null,
-  launchLegs: null,
-  launchTokenFactory: null,
-  clLPLocker: null,
-  binLPLocker: null,
-  clLaunchGuardHook: null,
-  binLaunchGuardHook: null,
-  padFactory: null,
-};
 
 /**
  * Every Latch contract on one chain.
@@ -386,8 +360,15 @@ export interface LatchDeployment {
   readonly governanceSafe: Address;
   /** 48h tier. Vault and the pool manager owners — irreversible powers. */
   readonly timelockCustody: Address;
-  /** 6h tier. Fee policy, descriptor, router — reversible ones. */
-  readonly timelockPolicy: Address;
+  /**
+   * 6h tier. Fee policy, descriptor, router — reversible ones.
+   *
+   * `null` where no policy timelock exists. The Policy tier was retired on
+   * 2026-09-12 (reversible actions sit with the Safe directly), so chains
+   * deployed after that — Base — have none. Robinhood and Sepolia keep theirs
+   * because they are on chain and still hold whatever was given to them.
+   */
+  readonly timelockPolicy: Address | null;
   /**
    * The canonical Safe v1.4.1 contracts on this chain (`deployments/safe.ts`):
    * what the governance Safe is a proxy of, and the `MultiSendCallOnly` a
@@ -548,7 +529,7 @@ export interface LatchDeployment {
    */
   readonly revShareHooks: readonly RevShareHookRecord[];
 
-  /* -- tokens and reference pool ------------------------------------------ */
+  /* -- tokens -------------------------------------------------------------- */
 
   /**
    * Tokens whose decimals have been read off their own contracts.
@@ -558,8 +539,6 @@ export interface LatchDeployment {
    * transacted with, carried so nobody has to guess a decimals value.
    */
   readonly tokens: readonly TokenInfo[];
-  /** See `ReferencePool`. `null` on a chain where nothing has been initialised. */
-  readonly demoPool: ReferencePool | null;
 }
 
 /* ============================================================================
@@ -578,23 +557,27 @@ export interface LatchDeployment {
  */
 const DEPLOYMENTS_TABLE = {
   /* --------------------------------------------------------------------------
-     Robinhood Chain — the FIRST MAINNET. Deployed 2026-09-11; all eighteen
-     contracts verified on Sourcify (Blockscout's own endpoint 403s behind
-     Cloudflare, so do not retry that route). Full record in
-     `ops/safe/robinhood-deployment.md`.
+     Robinhood Chain — mainnet. REDEPLOYED 2026-09-27 (owner 2026-09-26: "we
+     are redeploying on robinhood"): a fresh stack from the same deployer and
+     salts as Base, so every Latch address below equals Base's. Nothing was
+     migrated from the first stack (2026-09-11, bound to the retired Vault
+     0x78e8…fB6c); those contracts stay on chain and are no longer read.
 
-     GOVERNANCE IS REAL HERE. Every contract answers to the 2-of-3 Safe and the
-     handover to the two timelocks is queued. A screen that says "owned by a
-     timelock" must read `owner()`; it cannot infer it from this file.
+     OWNERSHIP MUST BE READ, NOT ASSUMED. The Safe and the custody timelock are
+     identifiers here, not claims about who owns what at any given block: read
+     `owner()` / `pendingOwner()` on the contract you care about.
      -------------------------------------------------------------------------- */
   4663: {
     chainId: 4663,
     key: "robinhood",
     name: "Robinhood Chain",
-    explorer: "https://robinhoodchain.blockscout.com",
+    /* Official explorer (owner 2026-09-27); Etherscan chainlist: 4663 -> robin.etherscan.io, v2 API live. */
+    explorer: "https://robin.etherscan.io",
     isMainnet: true,
-    /* Block the first Latch contract landed — the two timelocks. */
-    deployedAtBlock: 60111836n,
+    /* The REDEPLOYED stack (2026-09-27, owner 2026-09-26: "we are redeploying on robinhood"): first
+       transaction, the core Create3Factory, landed in L2 block 74,028,398. The first stack (from block
+       60,111,836) is retired and bound to the retired Vault 0x78e8…fB6c. */
+    deployedAtBlock: 74028398n,
     nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
 
     /* Arbitrum Nitro. Measured 2026-09-13: eth_call NUMBER 25,972,228 while
@@ -606,85 +589,91 @@ const DEPLOYMENTS_TABLE = {
     contractBlockClock: "parent-l1",
     contractBlockTimeCentis: 1200,
 
-    vault: "0x78e8359c6D34Df797b8A793dE8c7c6bffA97fB6c",
-    clPoolManager: "0xf4A28fA4CFeCAEf349A7D52fA1eB4dF56EB22F66",
-    binPoolManager: "0x1bB57b3A59b69f128700Ff59cC6EE22835aE6979",
-    clPoolManagerOwner: "0x5D7111d6c624e9a08aE63d342E4baE5878989a67",
-    binPoolManagerOwner: "0x98920e33313257Ffd942f94379A7ced216462665",
+    vault: "0xaC44C903CE3d89054fD5b70e0E396f26b214CBE3",
+    clPoolManager: "0x3d4afd3190b1e5036e410abb576f99c02D6fBb20",
+    binPoolManager: "0xbD6274D94102C3fCafE043f8EF7C7F33f33B255A",
+    clPoolManagerOwner: "0xa66f5f4aE2682a965956Fd6B0E448Ec7D8Ce1a3E",
+    binPoolManagerOwner: "0xeA8480331310Cf1EEA2D1d8E41429AE163EcfA51",
 
-    /* V2, wired to both managers 2026-09-13. Takes 25% of the total swap fee
-       (999 pips on a 0.30% pool) and, unlike V1, can actually collect it. */
-    feeController: "0x9c2c09EFBDb1726d3563B3f92F9912C9134f54aB",
-    clProtocolFeeController: "0xb1cC5BDBADD19a2430131EaE332afD72fF6be64B",
-    binProtocolFeeController: "0x320feB54e940741AeB037E3944F2C95afAEE84af",
+    /* LatchProtocolFeeControllerV3, composing over V2 0x03Eda5609a11f9259fB0EBdB8f7671e09A932aBe
+       (the same addresses as Base). Whether it is in force is
+       `poolManager.protocolFeeController()`, read it. */
+    feeController: "0x197855617B40D79b4eaD1b4e0f8Bf6ab41022b19",
+    clProtocolFeeController: null,
+    binProtocolFeeController: null,
 
-    /* The 2-of-3 Safe SUPERSEDED by the 3-of-4 `0xeA7903Ed…a038` on 2026-09-24. It stays here
-       because this field records who governs 4663 TODAY, and that is still this address: the new
-       Safe is not deployed on Robinhood, and none of the live contracts have been transferred.
-       New chains get the new Safe; this line changes only when the transfers are executed. */
-    governanceSafe: "0x715a6176946aDbD22c1B2021d321Fb3767ca3432",
+    /* The 3-of-4 Safe of record, created on 4663 on 2026-09-26. The 2-of-3 `0x715a…3432` it
+       superseded still exists here and still owns the RETIRED first stack; nothing reads it. */
+    governanceSafe: "0xeA7903Ed7d5FAE93CE1500ED2c4df138bDF0a038",
     safe: SAFE_CONTRACTS[4663]!,
-        /* REDEPLOYED 2026-09-12, all six Sourcify-verified. The addresses above
-       these are the originals and are retired, NOT dead: a retired
-       LatchRegistry still answers latchCount() and renders as a healthy empty
-       marketplace, which is exactly how the 2026-09-10 rename went unnoticed.
-       Retired: registry 0xE4395085…, revShareHook 0x23CE34E8…, timelockCustody
-       0x63F08A69…. The LTT1/LTT2 pool stays bound to the OLD RevShareHook
-       forever, because poolKey.hooks is part of the pool id. */
-timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
-    timelockPolicy: "0x1Da3AD33AB8151Af9EE91b90fA23fFdDFf9C0C3A",
+    /* No policy timelock: the tier was retired 2026-09-12. Retired contracts are NOT dead: a
+       retired LatchRegistry still answers latchCount() and renders as a healthy empty
+       marketplace, which is exactly how the 2026-09-10 rename went unnoticed. */
+    timelockCustody: "0x71E6B57d1dC373929899e6189771ee9115B4EF14",
+    timelockPolicy: null,
 
-    registry: "0xb2c8BB7473A09b0906f192D69e30D7362fA988CC",
+    registry: "0x197855eBa41da04f2A380ba612AdD1C48f7a27aA",
 
-    universalRouter: "0x2220dF8ec6CABC7f2074bC1e56DA092B765f736c",
+    universalRouter: "0xd3dF9e77ed0Cf41B22BB0c7E527caE966CF79695",
 
-    /* LatchFillRouter is not deployed on this chain yet. `null` is the deployed-state answer,
+    /* LatchFillRouter. `EXECUTOR()` on the router is the authority for its executor. */
+    fillRouter: "0x197827dceB223ADDeE5cbdf123C08df6b73016E3",
+    clPositionManager: "0x637A989326Fe99e9618A97f68D05621858B68973",
+    binPositionManager: "0x585F7D8DAFEA7178ea91a54789f5059C2B1D3998",
+    clQuoter: "0x0f971d005eC4E6E2f0dEe532ce4E9469c4D2651A",
+    binQuoter: "0x684eD241c7B15eC83b1F4f93c049C6F74f504fEF",
+    clPositionDescriptor: "0x69d18C3F0CFf468B9b2afb729b326D93eD2C7A22",
 
-       not a placeholder: callers route through Latch pools only. */
-
-    fillRouter: null,
-    clPositionManager: "0x957cc13b24a563cc92253213d9d5e6954c8db6a7",
-    binPositionManager: "0x990f395003c35a0ab390e10b003972407f882399",
-    clQuoter: "0xdfd14247f87d1e4fc82f0f441fb43bc8aa466114",
-    binQuoter: "0xbee22c7edf206b3f24fa0e86ccdd2f35738eb28c",
-    clPositionDescriptor: "0x0af03bee134ce66ee12425ee05a50f32c72644eb",
-
-    create3Factory: "0x6ffdf9a3df7e9dd55bad2e60c7405cd181005633",
+    create3Factory: "0x501D3a1F7674BE9f4BCe56bE81Dc3CafA1E51BD1",
     permit2: "0x000000000022D473030F116dDEE9F6B43aC78BA3",
     /* Canonical per docs.robinhood.com/chain/contracts. The predeploys you
        would reach for out of habit — 0x4200…06 and 0xC02aaA… — have NO CODE on
        this chain. */
     weth: "0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73",
 
-    revShareHook: "0xfC00485AFB2f9C73Bd7F9f5e72d14709233E2aD2",
+    revShareHook: "0x1978A2C6905aC690f21b23d581dc5b1E0Aa18266",
 
-    launchRegistry: "0x6D10B4CeDb53aD50c5A1D83f27fcE9c5C3b15c94",
-    launchpadKit: "0x2a4CA9809C873f9a7eb132cb073710F26D0bBcA7",
-    launchGuardHook: "0x8b4F6699F1D2E1b368aDFb802D14adf4e474575c",
-    /* Kit v2 stack: built and tested, not deployed on Robinhood. */
-    launchpadV2: LAUNCHPAD_V2_NOT_DEPLOYED,
-    splitFactory: null,
-    positionLock: null,
-    tokenLock: null,
-    multisend: null,
-    dropFactory: null,
+    launchRegistry: "0x1978f09B8F8886251e2693566822b7aCC30faD59",
+    /* v1 kit 0x2a4C…bcA7 and its block-clock guard 0x8b4F…575c are RETIRED with the first stack:
+       both are bound to the retired Vault and managers. */
+    launchpadKit: null,
+    launchGuardHook: null,
+    launchpadV2: {
+      launchpadKitV2: "0x19789C58f0d648146a698D6d3fAAA40Abb3e68a8",
+      launchLegs: "0x1978bCCCe1CfaCD456a1908fe1c8c3198203917A",
+      launchTokenFactory: "0x197865Bf8bEb9d597feAfd39136d5aDA2e8DBcD7",
+      clLPLocker: "0x1978ECb2789423aE7fB4020dD432bc614741206c",
+      binLPLocker: "0x1978029ec07FF1E85FA1fF53d430322D08F8F01f",
+      clLaunchGuardHook: "0x1978493942bDE85721d047655Cee31Ef57C0303f",
+      binLaunchGuardHook: "0x19785eB03DFeFea2371cc5C5Cd7130B5D829C195",
+      padFactory: "0x1978b82718FfbE0f0D2Ab0FfDc575b87fAfeca1C",
+    },
+    splitFactory: "0x1978F55996c371A30CdE8CA8015B0D362b72Cd53",
+    positionLock: "0x1978c7b933371bc4B238939De9dfE047653CFb85",
+    tokenLock: "0x19784D694a07bB88380B1e9e3F5d6506190d2A7a",
+    multisend: "0x1978DB38B8495b70FBa397b1F41f3dEd4A5FF2c2",
+    dropFactory: "0x1978989f87B6F05000e2A0C04451114f1f50C04E",
 
-    /* All three live launch/revenue contracts are the BLOCK-NUMBERED builds, and
-       all three were sized for the wrong clock (CLAUDE.md 3b): the kit and hook
-       declare 10 centis where the contract clock is 1200, so windows run ~120x
-       long. Their timestamp replacements are built and tested but NOT deployed.
-       When they are, change the address AND the clock below in the same edit. */
+    /* The redeployed stack is timestamp-clocked throughout. The retired block-numbered
+       RevShareHooks below keep their own clock records for readers of their old pools. */
     durationClocks: {
-      revShareHook: "contract-block",
-      launchpadKit: "contract-block",
-      launchGuardHook: "contract-block",
+      revShareHook: "timestamp",
+      launchpadKit: null,
+      launchGuardHook: null,
     },
     revShareHooks: [
+      {
+        address: "0x1978A2C6905aC690f21b23d581dc5b1E0Aa18266",
+        durationClock: "timestamp",
+        pendingShape: "timestamp-with-expiry",
+        status: "current",
+        note: "The redeployed stack (2026-09-27), timestamp source; same address as on Base.",
+      },
       {
         address: "0xfC00485AFB2f9C73Bd7F9f5e72d14709233E2aD2",
         durationClock: "contract-block",
         pendingShape: "block-with-expiry",
-        status: "current",
+        status: "retired",
         note:
           "432,000-block delay declared at 0.1 s; on the real ~12 s contract clock that is ~60 days, " +
           "and its proposal TTL ~360 days. No pools.",
@@ -756,25 +745,117 @@ timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
         isTestToken: true,
       },
     ],
+  },
 
-    /* The FIRST POOL ON MAINNET, created by
-       `packages/hooks-revshare/script/ExerciseRobinhood.s.sol` with RevShareHook
-       attached and exercised end to end — configure, initialize, add liquidity,
-       swap both directions, fees accrued and readable.
+  /* --------------------------------------------------------------------------
+     Base — mainnet. Deployed 2026-09-27 (core, periphery, router and the Latch
+     release), every contract verified on Sourcify and every address below read
+     back on chain after deployment.
 
-       LTT1/LTT2 are deliberately throwaway. Initializing a pool fixes its
-       starting price permanently, and the deployer holds no WETH or USDG to
-       defend a price it set on a real pair — an empty mispriced pool is a trap
-       for whoever LPs into it first. */
-    demoPool: {
-      id: "0xcb1fbdafcaa52a0cc8f5ece1752737c2a5eec2b7242953270c15bdd9818a50e8",
-      token0: "0x2A21c0826848f2D597B7C87A4B931dE1407958A6",
-      token1: "0xa29927045BDFfd61B8F539D491085F1b6f7A8bE4",
-      symbol0: "LTT1",
-      symbol1: "LTT2",
-      lpFee: 3000,
-      tickSpacing: 60,
+     OWNERSHIP MUST BE READ, NOT ASSUMED. The Safe and the custody timelock are
+     identifiers here, not claims about who owns what at any given block: read
+     `owner()` / `pendingOwner()` on the contract you care about.
+
+     No policy timelock (the tier was retired 2026-09-12), no upstream
+     ProtocolFeeControllers and no Kit v1: the release is timestamp-clocked
+     throughout.
+     -------------------------------------------------------------------------- */
+  8453: {
+    chainId: 8453,
+    key: "base",
+    name: "Base",
+    explorer: "https://basescan.org",
+    isMainnet: true,
+    /* The Create3Factory's deployment receipt — the first Latch transaction on Base. */
+    deployedAtBlock: 51856606n,
+    nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+
+    /* OP-stack: `block.number` inside the EVM is Base's own L2 block (~2 s),
+       the same clock `eth_blockNumber` reports. See `chains/clock.ts`. */
+    contractBlockClock: "native",
+    contractBlockTimeCentis: 200,
+
+    vault: "0xaC44C903CE3d89054fD5b70e0E396f26b214CBE3",
+    clPoolManager: "0x3d4afd3190b1e5036e410abb576f99c02D6fBb20",
+    binPoolManager: "0xbD6274D94102C3fCafE043f8EF7C7F33f33B255A",
+    clPoolManagerOwner: "0xa66f5f4aE2682a965956Fd6B0E448Ec7D8Ce1a3E",
+    binPoolManagerOwner: "0xeA8480331310Cf1EEA2D1d8E41429AE163EcfA51",
+
+    /* LatchProtocolFeeControllerV3, composing over V2 0x03Eda5609a11f9259fB0EBdB8f7671e09A932aBe.
+       Whether it is in force is `poolManager.protocolFeeController()`, read it. */
+    feeController: "0x197855617B40D79b4eaD1b4e0f8Bf6ab41022b19",
+    clProtocolFeeController: null,
+    binProtocolFeeController: null,
+
+    governanceSafe: "0xeA7903Ed7d5FAE93CE1500ED2c4df138bDF0a038",
+    safe: SAFE_CONTRACTS[8453]!,
+    timelockCustody: "0x71E6B57d1dC373929899e6189771ee9115B4EF14",
+    timelockPolicy: null,
+
+    registry: "0x197855eBa41da04f2A380ba612AdD1C48f7a27aA",
+
+    universalRouter: "0xd3dF9e77ed0Cf41B22BB0c7E527caE966CF79695",
+    /* LatchFillRouter. Its executor (0xBD024353910230d2C62a70f7464E339801C772b6) is derived;
+       `EXECUTOR()` on the router is the authority. */
+    fillRouter: "0x197827dceB223ADDeE5cbdf123C08df6b73016E3",
+    clPositionManager: "0x637A989326Fe99e9618A97f68D05621858B68973",
+    binPositionManager: "0x585F7D8DAFEA7178ea91a54789f5059C2B1D3998",
+    clQuoter: "0x0f971d005eC4E6E2f0dEe532ce4E9469c4D2651A",
+    binQuoter: "0x684eD241c7B15eC83b1F4f93c049C6F74f504fEF",
+    clPositionDescriptor: "0x69d18C3F0CFf468B9b2afb729b326D93eD2C7A22",
+
+    create3Factory: "0x501D3a1F7674BE9f4BCe56bE81Dc3CafA1E51BD1",
+    permit2: "0x000000000022D473030F116dDEE9F6B43aC78BA3",
+    /* The OP-stack predeploy. symbol()/decimals() read on chain 2026-09-27. */
+    weth: "0x4200000000000000000000000000000000000006",
+
+    revShareHook: "0x1978A2C6905aC690f21b23d581dc5b1E0Aa18266",
+
+    launchRegistry: "0x1978f09B8F8886251e2693566822b7aCC30faD59",
+    launchpadKit: null,
+    launchGuardHook: null,
+    launchpadV2: {
+      launchpadKitV2: "0x19789C58f0d648146a698D6d3fAAA40Abb3e68a8",
+      launchLegs: "0x1978bCCCe1CfaCD456a1908fe1c8c3198203917A",
+      launchTokenFactory: "0x197865Bf8bEb9d597feAfd39136d5aDA2e8DBcD7",
+      clLPLocker: "0x1978ECb2789423aE7fB4020dD432bc614741206c",
+      binLPLocker: "0x1978029ec07FF1E85FA1fF53d430322D08F8F01f",
+      clLaunchGuardHook: "0x1978493942bDE85721d047655Cee31Ef57C0303f",
+      binLaunchGuardHook: "0x19785eB03DFeFea2371cc5C5Cd7130B5D829C195",
+      padFactory: "0x1978b82718FfbE0f0D2Ab0FfDc575b87fAfeca1C",
     },
+    splitFactory: "0x1978F55996c371A30CdE8CA8015B0D362b72Cd53",
+    positionLock: "0x1978c7b933371bc4B238939De9dfE047653CFb85",
+    tokenLock: "0x19784D694a07bB88380B1e9e3F5d6506190d2A7a",
+    multisend: "0x1978DB38B8495b70FBa397b1F41f3dEd4A5FF2c2",
+    dropFactory: "0x1978989f87B6F05000e2A0C04451114f1f50C04E",
+
+    durationClocks: {
+      revShareHook: "timestamp",
+      launchpadKit: null,
+      launchGuardHook: null,
+    },
+    revShareHooks: [
+      {
+        /* CLOCK_MODE() read "mode=timestamp" on chain 2026-09-27. */
+        address: "0x1978A2C6905aC690f21b23d581dc5b1E0Aa18266",
+        durationClock: "timestamp",
+        pendingShape: "timestamp-with-expiry",
+        status: "current",
+        note: "Release-commit timestamp build: seconds-based delay and a 3-day proposal TTL.",
+      },
+    ],
+
+    tokens: [
+      {
+        /* symbol() "WETH", name() "Wrapped Ether", decimals() 18, read on chain 2026-09-27. */
+        address: "0x4200000000000000000000000000000000000006",
+        symbol: "WETH",
+        name: "Wrapped Ether",
+        decimals: 18,
+        isTestToken: false,
+      },
+    ],
   },
 
   /* --------------------------------------------------------------------------
@@ -782,7 +863,7 @@ timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
      here is governed: the deployer EOA still owns everything and the two
      timelocks are deployed but inert (their sole proposer is that same EOA,
      which is a delay on one key, not governance). They are redeployed properly
-     before mainnet; see CLAUDE.md "Deployment order".
+     before mainnet; per the deployment order.
 
      Source: `packages/core/script/config/latch-sepolia.json`, plus the periphery
      and router addresses read back after the later periphery deployment.
@@ -793,7 +874,14 @@ timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
     name: "Ethereum Sepolia",
     explorer: "https://sepolia.etherscan.io",
     isMainnet: false,
-    deployedAtBlock: 11672600n,
+    /* MEASURED, not estimated. Was 11672600n — the 2026-09-13 deployment — while the release
+       contracts landed on 2026-09-25, so the indexer's first pass asked for a 105,474-block span
+       that ALL FIVE public Sepolia endpoints refused at once and only completed by halving down.
+       The earliest event any watched contract has is block 11,778,074 (read from the indexer's
+       own table after that backfill, so the whole old range is proven empty rather than assumed
+       empty — nothing is lost by starting later). 74 blocks of margin, which costs nothing.
+       Raise this after any redeploy that retires the contracts below it. */
+    deployedAtBlock: 11778000n,
     nativeCurrency: { name: "Sepolia Ether", symbol: "ETH", decimals: 18 },
 
     /* An L1: NUMBER and eth_blockNumber are the same clock (both 11,699,528
@@ -837,13 +925,13 @@ timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
        `DeployLaunchRegistry.s.sol` reverts against it — replacing it is required on
        Sepolia, not optional. 0xB504… still answers and still holds its listings;
        nothing reads it. */
-    registry: "0x1978048A2e1a896384E0540E6dbE7edC89392695",
+    registry: "0x1978048a2E1a896384E0540e6dBe7Edc89392695",
 
     universalRouter: "0xB647CEbd5b8d6bE38C198634828187F482f4874B",
 
-    /* Deployed 2026-09-25 with the rest of the release (docs/sepolia-release-acceptance.md).
+    /* Deployed 2026-09-25 with the rest of the release.
        feeBps 10 inside an immutable maxFeeBps 50; owner is the Safe of record. */
-    fillRouter: "0x19783226d9b43e2B3fC7401AE5507d75e4A2a9bC",
+    fillRouter: "0x19783226D9b43E2B3fC7401ae5507D75e4a2A9bc",
     clPositionManager: "0xb3505d48A84651c104a02D41B2b9D8CB84dFEC33",
     binPositionManager: "0x965b1D98BB0cd4E0125D78AD17ea4d2D1d62AE6f",
     clQuoter: "0x4471e61fE697204908CA97CdF4810EeAf406e9C1",
@@ -866,19 +954,19 @@ timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
     launchpadKit: null,
     launchGuardHook: "0x19787323459816B6E76dF78507363269a9458197",
     /* The whole v2 stack, deployed 2026-09-25 from the release commit and exercised
-       live (docs/sepolia-release-acceptance.md): two launches, two swaps, the creator
+       live: two launches, two swaps, the creator
        tax taken, settled and claimed. Every owner is the Safe of record. */
     launchpadV2: {
       launchpadKitV2: "0x1978DC12388ee2feda6cFDfD7245F543fB019cb8",
-      launchLegs: "0x1978367629505f09D16Aed93616A643E25a71550",
-      launchTokenFactory: "0x1978C70A0e59A6b52477CE34dcE050cfC3e4b4a5",
-      clLPLocker: "0x1978d33E07D2Ed2e155C3f168e3510d027c49a48",
-      binLPLocker: "0x19787f213d0988005934A2f87dbd8e5C5E7A0D5e",
+      launchLegs: "0x1978367629505f09d16AEd93616A643E25a71550",
+      launchTokenFactory: "0x1978c70a0e59A6b52477ce34dce050CfC3E4b4A5",
+      clLPLocker: "0x1978D33E07d2ED2E155c3F168E3510D027C49A48",
+      binLPLocker: "0x19787F213d0988005934A2F87dBD8E5c5E7A0d5E",
       clLaunchGuardHook: "0x19787323459816B6E76dF78507363269a9458197",
-      binLaunchGuardHook: "0x1978a3F6d11c9A6cAEa0Df547cbE54a3fa7280F7",
-      padFactory: "0x19781ed911c36E5303c972545a31736c94d18604",
+      binLaunchGuardHook: "0x1978A3f6d11C9a6cAEa0Df547CbE54A3fa7280f7",
+      padFactory: "0x19781ED911c36E5303c972545A31736C94D18604",
     },
-    splitFactory: "0x19789714b1FEa5DFecf0761cbAF4fd1b6fC0728D",
+    splitFactory: "0x19789714b1fEa5dfECF0761cbAf4Fd1B6FC0728D",
     /* Latch utilities, REDEPLOYED 2026-09-25 by the RELEASE script
        (script/DeployLatchUtilities.s.sol), not by the 2026-09-19 showcase — the rule
        is that every release contract is deployed by its own script, and the showcase
@@ -887,10 +975,10 @@ timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
        1-day notice; the mainnet price is set by the mainnet deploy, not here.
        The 2026-09-19 set (0x9D73…, 0x502d…, 0xDe2e…, 0xbB34…) is still on chain and
        still works; nothing reads it. */
-    positionLock: "0x1979b9A756d00149F695c88C2F37f88228746Df9",
-    tokenLock: "0x1979481aAd83348B537B12a320bD3771e0836db4",
-    multisend: "0x1979F6410b204A31E4F94587768a910abd0AFAb4",
-    dropFactory: "0x197961b758267bE455c9dEb94F9525978d30b392",
+    positionLock: "0x1979B9a756D00149F695C88c2f37f88228746Df9",
+    tokenLock: "0x1979481aad83348b537b12a320bd3771e0836Db4",
+    multisend: "0x1979f6410B204A31E4f94587768a910Abd0aFAB4",
+    dropFactory: "0x197961B758267BE455c9dEb94f9525978d30b392",
 
     durationClocks: {
       /* 0x1C86… is the OLD block-based hook and stays the address book's
@@ -907,6 +995,17 @@ timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
         pendingShape: "block-no-expiry",
         status: "current",
         note: "Predates proposal expiry. An L1, so the contract block clock is the RPC one (12 s).",
+      },
+      {
+        /* Deployed 2026-09-25 by the release script. Read back 2026-09-26 by eth_call:
+           19,733 bytes of code, getHooksRegistrationBitmap() 0x0881, CLOCK_MODE "mode=timestamp",
+           CONFIG_PROPOSAL_TTL_SECONDS 259,200, owner() the Safe of record 0xeA79…a038, vault() and
+           poolManager() this chain's Vault and CL pool manager. */
+        address: "0x197837E55B7EA86120743d8F6eD9d4bbe50FC9CA",
+        durationClock: "timestamp",
+        pendingShape: "timestamp-with-expiry",
+        status: "live",
+        note: "Release-commit timestamp build: seconds-based delay and a 3-day proposal TTL. Not yet the address book's revShareHook.",
       },
     ],
 
@@ -933,19 +1032,6 @@ timelockCustody: "0x3aE354e2cdFB9Cb855ABA41c825F6Ee53f28e119",
         isTestToken: true,
       },
     ],
-
-    /* Created by `packages/fees/script/ExerciseSepolia.s.sol`. Real liquidity,
-       real swaps, worthless tokens. ltUSD is 18 decimals despite the name —
-       nothing prices these, and no dollar figure may be derived from them. */
-    demoPool: {
-      id: "0x1373a1db3e21b471647422e89bd87e4e97c0a5d0d2af24194226a40a5a402b38",
-      token0: "0x5c00ea81EedcED610c5174b9D20F83Ca245e269C",
-      token1: "0xbEf6E0f94Fe1a96390Eb25D32759aad85fD1f067",
-      symbol0: "ltUSD",
-      symbol1: "ltETH",
-      lpFee: 3000,
-      tickSpacing: 60,
-    },
   },
 } as const;
 

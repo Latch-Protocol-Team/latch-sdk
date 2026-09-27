@@ -1,4 +1,5 @@
-import { fallback, http, type FallbackTransport, type HttpTransportConfig } from 'viem'
+import { fallback, type FallbackTransport, type HttpTransportConfig } from 'viem'
+import { cooledHttp, type CooldownOptions } from './cooldown.js'
 import {
   chainById,
   resolveEndpoints,
@@ -61,6 +62,15 @@ export interface LatchTransportOptions {
   timeout?: number
   /** Extra viem http() config applied to every endpoint. */
   httpConfig?: HttpTransportConfig
+  /** Endpoint cooldown after a transport failure (see chains/cooldown.ts). `false` disables it. */
+  cooldown?: CooldownOptions | false
+  /**
+   * Put the chain's PUBLIC endpoints behind the ones supplied in `env`. Default: true, unless a
+   * supplied endpoint is local / private-network (a devnet or a fork), which is then used alone —
+   * otherwise a failed local request, a signed transaction included, falls through to the real
+   * chain. Set `false` to make any supplied endpoint exclusive. See `resolveEndpoints`.
+   */
+  publicFallback?: boolean
 }
 
 export class UnknownChainError extends Error {
@@ -91,13 +101,15 @@ export function latchTransport(
     perEndpointRetries = 0,
     timeout = 10_000,
     httpConfig,
+    cooldown = {},
+    publicFallback,
   } = opts
 
-  const urls = resolveEndpoints(chainId, env)
+  const urls = resolveEndpoints(chainId, env, publicFallback === undefined ? {} : { publicFallback })
   if (urls.length === 0) throw new UnknownChainError(chainId)
 
   return fallback(
-    urls.map((url) => http(url, { retryCount: perEndpointRetries, timeout, ...httpConfig })),
+    urls.map((url) => cooledHttp(url, { retryCount: perEndpointRetries, timeout, ...httpConfig }, cooldown === false ? { baseMs: 0, maxMs: 0 } : cooldown)),
     { rank, retryCount },
   )
 }

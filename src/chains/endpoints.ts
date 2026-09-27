@@ -540,15 +540,17 @@ export const CHAIN_RPCS = {
        failure was local. It is now GONE, because the re-probe found two endpoints that answer:
        a production /app had been spending 9 requests on it before reaching a working provider,
        and "kept in case it is local" is only worth a slot when nothing verified can fill it.
-       `1rpc.io/sepolia` went with it (plan usage limit). `xrpc.cl/sepolia` is last and its
-       2.7 s is real, not a typo — it is only reached when four faster providers have all
-       failed, and at that point slow beats nothing. */
+       `1rpc.io/sepolia` went with it (plan usage limit). */
     endpoints: [
       { url: 'https://11155111.rpc.thirdweb.com', latencyMs: 46, eip1153: true },
       { url: 'https://ethereum-sepolia-rpc.publicnode.com', latencyMs: 131, eip1153: true },
       { url: 'https://0xrpc.io/sep', latencyMs: 194, eip1153: true },
       { url: 'https://rpc.sepolia.ethpandaops.io', latencyMs: 207, eip1153: true },
-      { url: 'https://xrpc.cl/sepolia', latencyMs: 2673, eip1153: true },
+      /* `xrpc.cl/sepolia` REMOVED 2026-09-26: it answers eth_getLogs over the release range with an
+         EMPTY list and no error, where publicnode and ethpandaops return all 10 Initialize logs for
+         the same query. A wrong answer is worse than a refusal: the failover only moves on after an
+         error, so whenever this endpoint was reached, pools and swaps silently read as zero (the
+         dashboard's "no swaps yet" and /pools' "no pools" on a chain that has both). */
     ],
   },
   /* Monad Testnet (10143) was REMOVED on 2026-09-24 — owner decision, "we are not using monad
@@ -643,6 +645,8 @@ export const THIN_ENDPOINT_CHAINS: readonly ChainKey[] = [
   'plasma',
   'stable',
   'stableTestnet',
+  // 4 since 2026-09-26: xrpc.cl/sepolia removed for answering getLogs with an empty list.
+  'sepolia',
 ]
 
 /** The number of public endpoints this file aims to carry per chain. */
@@ -663,22 +667,61 @@ export function chainById(chainId: number): ChainRpcConfig | undefined {
  * lag, and disappear. Supply yours via env (`LATCH_RPC_<CHAINID>`, comma-separated for
  * several) and they are tried before the public list, which then acts as a safety net.
  *
+ * THE PUBLIC SAFETY NET IS NOT ALWAYS WANTED. A caller-supplied RPC that points at a LOCAL or
+ * private-network node (a devnet on 127.0.0.1, an anvil fork, a node on 10.x / 192.168.x) is used
+ * ALONE by default: behind it the public list is the REAL chain, so a failed local request — a
+ * signed `eth_sendRawTransaction` among them — would silently fall through to mainnet. Pass
+ * `publicFallback` to decide explicitly either way (`false` for any exclusive endpoint, `true` to
+ * keep the net behind a local node on purpose).
+ *
  * @param chainId target chain
  * @param env process environment, injected so this stays testable and browser-safe
+ * @param opts `publicFallback`: append the chain's public endpoints behind the supplied ones.
+ *        Default: true, unless a supplied endpoint is local / private-network (see `isLocalRpcUrl`).
  */
 export function resolveEndpoints(
   chainId: number,
   env: Record<string, string | undefined> = {},
+  opts: { readonly publicFallback?: boolean } = {},
 ): string[] {
-  const priv = (env[`LATCH_RPC_${chainId}`] ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean)
+  const priv = suppliedEndpoints(chainId, env)
+  const fallback = opts.publicFallback ?? !priv.some(isLocalRpcUrl)
+  if (priv.length > 0 && !fallback) return [...new Set(priv)]
 
   const pub = chainById(chainId)?.endpoints.map((e) => e.url) ?? []
 
   // de-dupe while preserving order, private first
   return [...new Set([...priv, ...pub])]
+}
+
+/** The endpoints a caller supplied for `chainId` (`LATCH_RPC_<chainId>`, comma-separated). */
+function suppliedEndpoints(chainId: number, env: Record<string, string | undefined>): string[] {
+  return (env[`LATCH_RPC_${chainId}`] ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+/**
+ * True for an RPC URL that names a local or private-network host: `localhost` / `*.localhost`,
+ * loopback (127.0.0.0/8, ::1), 0.0.0.0, RFC 1918 (10/8, 172.16/12, 192.168/16), link-local
+ * (169.254/16), `*.local` and `host.docker.internal`. Such a node is a devnet or a fork, never the
+ * chain itself, and must not have the real chain's public endpoints behind it.
+ */
+export function isLocalRpcUrl(url: string): boolean {
+  let host: string
+  try {
+    host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  } catch {
+    return false
+  }
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host === 'host.docker.internal') return true
+  if (host === '::1' || host === '0.0.0.0') return true
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
+  if (m === null) return false
+  const a = Number(m[1])
+  const b = Number(m[2])
+  return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 169 && b === 254)
 }
 
 /**
@@ -716,6 +759,25 @@ export function resolveEndpoints(
  */
 export const LOG_RANGE_ENDPOINTS: Readonly<Record<number, readonly string[]>> = {
   4663: ["https://rpc.mainnet.chain.robinhood.com"],
+  /* Sepolia, 2026-09-26. The same Initialize query over the release range, repeated per endpoint:
+       rpc.sepolia.ethpandaops.io            3, 3   (the full, identical answer every time)
+       ethereum-sepolia-rpc.publicnode.com   3, 2   (load-balanced backends disagree; no error)
+       11155111.rpc.thirdweb.com             "Request exceeds defined limit" (an error: fine)
+       0xrpc.io/sep                          eth_getLogs not available (an error: fine)
+     An endpoint that answers SHORT without an error is the dangerous kind, because the failover
+     only moves on after an error. ethpandaops goes first for logs; the rest stay as fallback. */
+  11155111: ["https://rpc.sepolia.ethpandaops.io"],
+  /* Base, 2026-09-27, before any Latch contract exists there (so the indexer's first pass is
+     ready): WETH Deposit logs, each query repeated three times per endpoint.
+       2,000 blocks  mainnet.base.org 5,981 x3 · thirdweb "Log response size exceeded" ·
+                     tenderly "invalid params" · drpc "ranges over 10000 blocks…" (free plan) ·
+                     blastapi "up to a 10 block range"
+       200 blocks    mainnet.base.org, thirdweb, tenderly 542 x3 each (identical) · drpc and
+                     blastapi refuse as above
+     Every refusal is an ERROR, which the failover moves past; no endpoint answered short
+     without one (the Sepolia hazard). mainnet.base.org is the only one that served the wide
+     window, so it goes first for logs. Re-probe once Latch's own contracts are on Base. */
+  8453: ["https://mainnet.base.org"],
 };
 
 /**
@@ -731,8 +793,9 @@ export const LOG_RANGE_ENDPOINTS: Readonly<Record<number, readonly string[]>> = 
 export function resolveLogEndpoints(
   chainId: number,
   env: Record<string, string | undefined> = {},
+  opts: { readonly publicFallback?: boolean } = {},
 ): string[] {
-  const all = resolveEndpoints(chainId, env);
+  const all = resolveEndpoints(chainId, env, opts);
   const priv = (env[`LATCH_RPC_${chainId}`] ?? "")
     .split(",")
     .map((s) => s.trim())

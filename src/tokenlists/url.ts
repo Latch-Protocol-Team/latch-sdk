@@ -13,8 +13,8 @@
    verbatim.) One file per chain, served raw from the default branch, and the
    logos beside them under `logos/<chainId>/<address>.png`.
 
-   Nothing here points at latch.guru: that domain is still a placeholder
-   (CLAUDE.md, "X handle and latch.guru are both placeholders"), and a list
+   Nothing here points at the website domain
+   (it was a placeholder domain), and a list
    URL that does not resolve is a list nobody can load. An app that serves its
    own copy passes its base; the dapp reads `VITE_LATCH_TOKENLIST_BASE` for
    local development.

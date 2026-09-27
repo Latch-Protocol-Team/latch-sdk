@@ -327,6 +327,8 @@ export {
   readKitV2Launches,
   readKitV2Limits,
   readTokenMeta,
+  KIT_V2_LAUNCH_CREATED_EVENT,
+  KIT_V2_LAUNCH_LEG_CREATED_EVENT,
   /* Kit v2 build: a form draft to `createLaunch` calldata - token predicted
      and cross-checked, prices snapped, tenant terms restated, validated. */
   LAUNCH_TOKEN_DECIMALS,
@@ -402,6 +404,9 @@ export type {
   LaunchRecordV2,
   LaunchScanV2,
   LegKindWord,
+  KitV2LaunchCreatedLog,
+  KitV2LaunchLegCreatedLog,
+  KitV2LaunchLogs,
   ReadKitV2LaunchesOptions,
   ReadKitV2LimitsOptions,
   TokenMeta,
@@ -461,6 +466,7 @@ export * as indexer from "./indexer/index.js";
 // Chain RPC endpoints and the auto-failover transport.
 export * from "./chains/endpoints.js"
 export * from "./chains/transport.js"
+export * from "./chains/cooldown.js"
 // The block number CONTRACTS see, which on an Arbitrum Nitro chain is not the
 // one `eth_blockNumber` reports. Compare every contract-stored block number
 // against `readContractBlockNumber`; keep `getBlockNumber` for log ranges.
@@ -547,7 +553,6 @@ export type {
   LaunchpadV2Deployment,
   NativeCurrency,
   RedeployableContract,
-  ReferencePool,
   TokenInfo,
 } from "./deployments/index.js";
 
@@ -661,7 +666,7 @@ export type {
 // --- token lists (Uniswap Token Lists standard) ----------------------------
 // Types, a dependency-free schema validator, a bounded fetch, a runtime list of
 // LaunchpadKitV2 launches, a merge with per-token provenance, and the URL the
-// Latch lists are published at (a separate public repository, never latch.guru).
+// Latch lists are published at (a separate public repository, not the website).
 export * as tokenlists from "./tokenlists/index.js";
 export {
   LATCH_TOKENLIST_DEFAULT_BASE,
@@ -681,6 +686,9 @@ export {
   latchTokenListUrl,
   launchedTokenList,
   launchedTokenListFromScan,
+  launchedTokenListFromEntries,
+  UNVERIFIED_TAG,
+  UNVERIFIED_TAG_DEFINITION,
   mergeTokenLists,
   stockExtensionOf,
   tokenListUpdateKind,
@@ -700,6 +708,8 @@ export type {
   FetchedTokenList,
   LaunchedTokenList,
   LaunchedTokenListOptions,
+  LaunchedTokenEntry,
+  LaunchedTokenListFromEntriesOptions,
   MergeTokenListsOptions,
   MergedTokenList,
   MergedTokenListToken,

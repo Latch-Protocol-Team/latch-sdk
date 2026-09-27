@@ -519,7 +519,60 @@ export interface ReadKitV2LaunchesOptions {
   /** The chain id, for `readContractClock`. */
   readonly chainId: number;
   readonly env?: KitV2Env;
+  /**
+   * The kit's creation logs, already read by the caller (an indexer, or a windowed scan over a
+   * range-capped endpoint). When given, NO `eth_getLogs` is made: the two scans are replaced by
+   * these rows, and everything else (legs, guards, tax, locks, registry metadata, the clock) is
+   * still read live by `eth_call`. The `tenant` / `creator` filters are applied to these rows the
+   * way a node applies them to topics. The caller vouches that the rows are every `LaunchCreated`
+   * and `LaunchLegCreated` log of `kit` it wants reported; nothing here can check completeness.
+   */
+  readonly logs?: KitV2LaunchLogs;
 }
+
+/** The fields `readKitV2Launches` reads off one `LaunchCreated` log. */
+export interface KitV2LaunchCreatedLog {
+  readonly args: {
+    readonly token: Address;
+    readonly creator: Address;
+    readonly tenant: Address;
+    readonly launcher: Address;
+    readonly operator: Address;
+    readonly totalSupply: bigint;
+    readonly seedSupply: bigint;
+    readonly startTime: number | bigint;
+    readonly protocolFeeWei: bigint;
+    readonly integrator: Address;
+    readonly integratorFeeWei: bigint;
+  };
+  readonly blockNumber: bigint;
+  readonly transactionHash: Hex;
+}
+
+/** The fields `readKitV2Launches` reads off one `LaunchLegCreated` log. `kind` is the kit's `LegKind` (0 CL, 1 Bin). */
+export interface KitV2LaunchLegCreatedLog {
+  readonly args: {
+    readonly token: Address;
+    readonly poolId: Hex;
+    readonly quote: Address;
+    readonly kind: number;
+    readonly lockId: bigint;
+    readonly launchTokenSeeded: bigint;
+    readonly weightBps: number;
+  };
+}
+
+/** Pre-read creation logs for `ReadKitV2LaunchesOptions.logs`. */
+export interface KitV2LaunchLogs {
+  readonly created: readonly KitV2LaunchCreatedLog[];
+  readonly legs: readonly KitV2LaunchLegCreatedLog[];
+}
+
+/** The two kit events `readKitV2Launches` scans, for a caller that reads them itself (windowed). */
+export const KIT_V2_LAUNCH_CREATED_EVENT = LAUNCH_CREATED;
+export const KIT_V2_LAUNCH_LEG_CREATED_EVENT = LEG_CREATED;
+
+const sameAddress = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
 
 /** Every launch the kit created (filtered), newest first, with every leg read live. */
 export async function readKitV2Launches(client: PublicClient, kit: Address, opts: ReadKitV2LaunchesOptions): Promise<LaunchScanV2> {
@@ -527,9 +580,18 @@ export async function readKitV2Launches(client: PublicClient, kit: Address, opts
   const args: { tenant?: Address; creator?: Address } = {};
   if (opts.tenant !== undefined) args.tenant = opts.tenant;
   if (opts.creator !== undefined) args.creator = opts.creator;
+  const injected = opts.logs;
   const [created, legLogs, clock] = await Promise.all([
-    client.getLogs({ address: kit, event: LAUNCH_CREATED, args, fromBlock: opts.fromBlock, toBlock: "latest" }),
-    client.getLogs({ address: kit, event: LEG_CREATED, fromBlock: opts.fromBlock, toBlock: "latest" }),
+    injected === undefined
+      ? client.getLogs({ address: kit, event: LAUNCH_CREATED, args, fromBlock: opts.fromBlock, toBlock: "latest" })
+      : Promise.resolve(
+          injected.created.filter(
+            (l) =>
+              (args.tenant === undefined || sameAddress(l.args.tenant, args.tenant)) &&
+              (args.creator === undefined || sameAddress(l.args.creator, args.creator)),
+          ),
+        ),
+    injected === undefined ? client.getLogs({ address: kit, event: LEG_CREATED, fromBlock: opts.fromBlock, toBlock: "latest" }) : Promise.resolve(injected.legs),
     readContractClock(client, opts.chainId),
   ]);
   const now = clock.timestamp;

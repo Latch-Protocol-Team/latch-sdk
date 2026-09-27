@@ -19,7 +19,8 @@
 import type { Address, PublicClient } from "viem";
 
 import type { KitV2Env } from "../launchpad/kitV2/reads.js";
-import { NATIVE_ADDRESS, readKitV2Launches, type LaunchRecordV2, type LaunchScanV2 } from "../launchpad/kitV2/reads.js";
+import { telegramUrlOf, xUrlOf } from "../launchpad/kitV2/listing.js";
+import { NATIVE_ADDRESS, readKitV2Launches, type LaunchListing, type LaunchScanV2, type TokenMeta } from "../launchpad/kitV2/reads.js";
 import type { TokenList, TokenListToken } from "./types.js";
 import { TOKEN_LIST_LIMITS, validateTokenList } from "./validate.js";
 
@@ -29,6 +30,30 @@ export const LAUNCH_TAG_DEFINITION = {
   name: "Launch",
   description: "Minted by a LaunchpadKitV2 launch on Latch. Every position of its launch pools is locked forever.",
 } as const;
+
+/**
+ * The tag a list of ANY launch carries when Latch has not looked at the tokens in it: the
+ * chain-wide list the API publishes. Anyone can launch through the kit, so the kit's name on a
+ * token says how it was launched, never that it was reviewed.
+ */
+export const UNVERIFIED_TAG = "unverified";
+export const UNVERIFIED_TAG_DEFINITION = {
+  name: "Unverified",
+  description: "Not reviewed by Latch. Anyone can launch a token: read its contract and its pool before you trade.",
+} as const;
+
+/**
+ * What one token of the list needs, and nothing more: a chain scan's `LaunchRecordV2` is one,
+ * and so is a row the API's indexer stored. Keeping the builder on this shape is what lets both
+ * publish the same list.
+ */
+export interface LaunchedTokenEntry {
+  readonly token: Address;
+  readonly tenant: Address;
+  readonly createdAtBlock: bigint;
+  readonly tokenMeta: Pick<TokenMeta, "name" | "symbol" | "decimals"> | null;
+  readonly listing?: Pick<LaunchListing, "websiteURI" | "xHandle" | "telegramHandle"> | null;
+}
 
 export interface LaunchedTokenListOptions {
   /** The chain the kit is on. Written on every token and used by `readContractClock`. */
@@ -55,7 +80,22 @@ export interface LaunchedTokenList {
   readonly scan: LaunchScanV2;
 }
 
-function tokenFromLaunch(launch: LaunchRecordV2, chainId: number): TokenListToken | OmittedLaunch {
+/**
+ * A website URL fit to put in a public list, or `null`.
+ *
+ * `https://` only. The registry deliberately does not validate this field — a contract cannot make
+ * a URL safe and a partial filter reads as a guarantee — so the filtering belongs exactly here, at
+ * the point where the value is about to be handed to somebody else's wallet. `http://` is a
+ * downgrade, and `javascript:` / `data:` are injection vectors in anything that renders a list
+ * without allowlisting the scheme itself.
+ */
+function httpsOnly(url: string | undefined): string | null {
+  const u = (url ?? "").trim();
+  if (u === "" || !u.startsWith("https://")) return null;
+  return u;
+}
+
+function tokenFromLaunch(launch: LaunchedTokenEntry, chainId: number, unverified: boolean): TokenListToken | OmittedLaunch {
   const meta = launch.tokenMeta;
   if (meta === null) return { token: launch.token, reason: "the token did not answer symbol, name and decimals" };
   const name = meta.name.length > TOKEN_LIST_LIMITS.tokenNameMax ? meta.name.slice(0, TOKEN_LIST_LIMITS.tokenNameMax) : meta.name;
@@ -65,43 +105,88 @@ function tokenFromLaunch(launch: LaunchRecordV2, chainId: number): TokenListToke
     decimals: meta.decimals,
     name,
     symbol: meta.symbol,
-    tags: [LAUNCH_TAG],
+    tags: unverified ? [LAUNCH_TAG, UNVERIFIED_TAG] : [LAUNCH_TAG],
     extensions: {
       latch: {
         launchpad: launch.tenant.toLowerCase() === NATIVE_ADDRESS ? null : launch.tenant,
         token: launch.token,
+        /*
+         * THE PROJECT'S OWN LINKS, so a wallet or a bot reading this list can reach it.
+         *
+         * They come from `LatchLaunchRegistry`, which has stored them since kit v2 — the creator
+         * already typed them into the launch wizard. Until now they lived only on that registry,
+         * which nothing outside Latch queries, so a token that HAD a website and an X account
+         * looked anonymous everywhere it mattered.
+         *
+         * The two handles are converted to URLs by `xUrlOf` / `telegramUrlOf`, which refuse
+         * anything outside the charset the registry itself enforces. That is the point: a list
+         * consumer renders these next to a token somebody is deciding whether to buy, so a
+         * creator must not be able to aim "Telegram" at a domain of their choosing. `website` is
+         * the one field that IS a creator-supplied destination, and it travels only when it is
+         * `https://` — a consumer should still treat it as untrusted.
+         *
+         * `null` where the creator gave nothing, and where the listing could not be read at all.
+         * Never an empty string, never a guess.
+         */
+        website: httpsOnly(launch.listing?.websiteURI),
+        x: xUrlOf(launch.listing?.xHandle ?? ""),
+        telegram: telegramUrlOf(launch.listing?.telegramHandle ?? ""),
       },
     },
   };
   /* Judge the one token through the list validator so the reason is the schema's own. */
-  const issues = validateTokenList({ name: "x", timestamp: "2000-01-01T00:00:00Z", version: { major: 1, minor: 0, patch: 0 }, tokens: [token], tags: { [LAUNCH_TAG]: LAUNCH_TAG_DEFINITION } });
+  const issues = validateTokenList({ name: "x", timestamp: "2000-01-01T00:00:00Z", version: { major: 1, minor: 0, patch: 0 }, tokens: [token], tags: tagDefinitions(unverified) });
   if (issues.length > 0) return { token: launch.token, reason: issues.map((i) => `${i.path.replace(/^tokens\[0\]\./, "")}: ${i.message}`).join("; ") };
   return token;
 }
 
-/** The list for a scan already in hand (the pad site reads one anyway). Pure. */
-export function launchedTokenListFromScan(scan: LaunchScanV2, options: Pick<LaunchedTokenListOptions, "chainId" | "name">): LaunchedTokenList {
+function tagDefinitions(unverified: boolean): NonNullable<TokenList["tags"]> {
+  return unverified ? { [LAUNCH_TAG]: LAUNCH_TAG_DEFINITION, [UNVERIFIED_TAG]: UNVERIFIED_TAG_DEFINITION } : { [LAUNCH_TAG]: LAUNCH_TAG_DEFINITION };
+}
+
+export interface LaunchedTokenListFromEntriesOptions {
+  readonly chainId: number;
+  /** The list's `name`. 1 to 30 word characters or spaces. Default `Latch launches`. */
+  readonly name?: string;
+  /** Unix seconds the entries were read at: the list's `timestamp`. */
+  readonly now: bigint;
+  /** Tag every token `unverified` too. For a list of every launch on a chain, which nobody reviewed. */
+  readonly unverified?: boolean;
+}
+
+/**
+ * The list for launches already in hand, from wherever they were read: a chain scan or an
+ * indexer's rows. Pure. Oldest first and deduped, so a list built from a growing kit only ever
+ * appends; the version is `1.<token count>.0`.
+ */
+export function launchedTokenListFromEntries(entries: readonly LaunchedTokenEntry[], options: LaunchedTokenListFromEntriesOptions): Omit<LaunchedTokenList, "scan"> {
+  const unverified = options.unverified === true;
   const tokens: TokenListToken[] = [];
   const omitted: OmittedLaunch[] = [];
   const seen = new Set<string>();
-  /* Oldest first, so a list built from a growing kit only ever appends. */
-  const launches = [...scan.launches].sort((a, b) => Number(a.createdAtBlock - b.createdAtBlock));
+  const launches = [...entries].sort((a, b) => (a.createdAtBlock < b.createdAtBlock ? -1 : a.createdAtBlock > b.createdAtBlock ? 1 : 0));
   for (const launch of launches) {
     const key = launch.token.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    const t = tokenFromLaunch(launch, options.chainId);
+    const t = tokenFromLaunch(launch, options.chainId, unverified);
     if ("reason" in t) omitted.push(t);
     else tokens.push(t);
   }
   const list: TokenList = {
     name: options.name ?? "Latch launches",
-    timestamp: new Date(Number(scan.now) * 1000).toISOString(),
+    timestamp: new Date(Number(options.now) * 1000).toISOString(),
     version: { major: 1, minor: tokens.length, patch: 0 },
     tokens,
-    tags: { [LAUNCH_TAG]: LAUNCH_TAG_DEFINITION },
+    tags: tagDefinitions(unverified),
   };
-  return { list, omitted, scan };
+  return { list, omitted };
+}
+
+/** The list for a scan already in hand (the pad site reads one anyway). Pure. */
+export function launchedTokenListFromScan(scan: LaunchScanV2, options: Pick<LaunchedTokenListOptions, "chainId" | "name">): LaunchedTokenList {
+  const r = launchedTokenListFromEntries(scan.launches, { chainId: options.chainId, now: scan.now, ...(options.name === undefined ? {} : { name: options.name }) });
+  return { ...r, scan };
 }
 
 /**

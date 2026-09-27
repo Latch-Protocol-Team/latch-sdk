@@ -52,6 +52,14 @@ export const LAUNCH_MAX_METADATA_URI_BYTES = 512;
 export const TOKEN_METADATA_MAX_NAME = 64;
 export const TOKEN_METADATA_MAX_SYMBOL = 16;
 export const TOKEN_METADATA_MAX_DESCRIPTION = 1000;
+/** A website URL. Long enough for any real one, short enough that nobody pins an essay. */
+export const TOKEN_METADATA_MAX_WEBSITE = 200;
+/** The platforms' own limits: X is 15 characters, Telegram 32. */
+export const TOKEN_METADATA_MAX_X = 15;
+export const TOKEN_METADATA_MAX_TELEGRAM = 32;
+
+/** The charset both platforms allow, and the one `LatchLaunchRegistry` enforces on chain. */
+const HANDLE = /^[A-Za-z0-9_]+$/;
 
 const DATA_JSON_PREFIX = "data:application/json";
 
@@ -69,12 +77,43 @@ export interface TokenMetadata {
   /** `ipfs://<cid>` for the icon. Omitted when the creator supplied none. */
   readonly image?: string;
   readonly description?: string;
+  /*
+   * ################ WHY THE LINKS ARE HERE AT ALL ################
+   *
+   * A scanner or a trading bot that picks up a new pair reads the TOKEN. From a Latch launch it
+   * got `name`, `symbol`, `decimals` and this document — and this document had no way back to the
+   * project. Meanwhile `LatchLaunchRegistry.LaunchMetadata` has carried the creator's website, X
+   * and Telegram since kit v2 shipped: the data existed, one contract away, where nothing outside
+   * Latch knows to look. These three fields close that, and they cost nothing on chain because
+   * only the URI is stored there.
+   *
+   * ################ HANDLES, NOT URLs, AND THAT IS THE SECURITY PART ################
+   *
+   * `x` and `telegram` are BARE HANDLES, exactly as the registry stores them, so a consumer builds
+   * `https://x.com/<handle>` itself. A creator-supplied URL field would let "Telegram" point at any
+   * domain, and the one place that link is rendered is next to a token somebody is deciding whether
+   * to buy — the highest-value place in the product to put a phishing target. A handle cannot carry
+   * a destination. `website` HAS to be a URL, so it is the one field a consumer must still treat as
+   * creator-controlled; it is bounded to `https://` for the same reason `image` is bounded to
+   * `ipfs://` (see `validateTokenMetadata`).
+   */
+  /** Absolute `https://` URL. The only creator-controlled destination in this document. */
+  readonly website?: string;
+  /** X handle WITHOUT the "@" — the consumer builds the URL. */
+  readonly x?: string;
+  /** Telegram handle, group or channel WITHOUT the "@" — the consumer builds the URL. */
+  readonly telegram?: string;
 }
 
 export interface TokenMetadataIssue {
-  readonly field: "name" | "symbol" | "image" | "description" | "uri";
+  readonly field: "name" | "symbol" | "image" | "description" | "website" | "x" | "telegram" | "uri";
   readonly message: string;
 }
+
+/* Turning a handle into a URL is `xUrlOf` / `telegramUrlOf` in `./listing.ts`, which already
+   existed for the registry's copy of the same two fields and validates the charset before it
+   builds anything. A second pair here would be the "same fact in two places" problem this package
+   keeps warning about, so there isn't one — the document and the registry share one converter. */
 
 function utf8Bytes(text: string): number {
   return new TextEncoder().encode(text).length;
@@ -127,6 +166,37 @@ export function validateTokenMetadata(value: unknown): readonly TokenMetadataIss
       issues.push({ field: "description", message: `description is over ${TOKEN_METADATA_MAX_DESCRIPTION} bytes` });
     }
   }
+
+  /* `https://` only. `http://` is a downgrade a wallet should not present as the project's site,
+     and `javascript:` / `data:` are injection vectors in anything that renders this without
+     allowlisting the scheme itself. Refusing here does not excuse a consumer from checking — a
+     document can be served by anyone — but it stops the SDK from ever PINNING one. */
+  const website = m["website"];
+  if (website !== undefined && website !== "") {
+    if (typeof website !== "string" || !website.startsWith("https://")) {
+      issues.push({ field: "website", message: "website must be an absolute https:// URL" });
+    } else if (utf8Bytes(website) > TOKEN_METADATA_MAX_WEBSITE) {
+      issues.push({ field: "website", message: `website is over ${TOKEN_METADATA_MAX_WEBSITE} bytes` });
+    }
+  }
+
+  /* A handle, never a URL. The message says so explicitly because pasting the whole link is the
+     obvious mistake and a bare "invalid" would send someone hunting for a typo. */
+  for (const [field, max] of [
+    ["x", TOKEN_METADATA_MAX_X],
+    ["telegram", TOKEN_METADATA_MAX_TELEGRAM],
+  ] as const) {
+    const v = m[field];
+    if (v === undefined || v === "") continue;
+    if (typeof v !== "string" || !HANDLE.test(v)) {
+      issues.push({
+        field,
+        message: `${field} must be a bare handle (letters, digits and underscores) — not a URL and not an @`,
+      });
+    } else if (v.length > max) {
+      issues.push({ field, message: `${field} is over ${max} characters` });
+    }
+  }
   return issues;
 }
 
@@ -140,6 +210,15 @@ export function buildTokenMetadata(input: TokenMetadata): TokenMetadata {
   if (input.image !== undefined && input.image !== "") out["image"] = input.image;
   const description = input.description?.trim();
   if (description !== undefined && description !== "") out["description"] = description;
+  /* Key order is fixed, because `tokenMetadataDocument` promises that the same input pins to the
+     same CID. Appending the links AFTER the existing keys also means a document pinned before this
+     change and one pinned after it differ only by the new members. */
+  const website = input.website?.trim();
+  if (website !== undefined && website !== "") out["website"] = website;
+  const x = input.x?.trim();
+  if (x !== undefined && x !== "") out["x"] = x;
+  const telegram = input.telegram?.trim();
+  if (telegram !== undefined && telegram !== "") out["telegram"] = telegram;
   return out as unknown as TokenMetadata;
 }
 

@@ -5,7 +5,7 @@
  * WHY A SCRIPT AND NOT A COPY. The moment the SDK exists in two working trees
  * it can differ in two working trees, and the difference is invisible until an
  * integrator hits it. This repo already carries a scar from exactly that shape:
- * CLAUDE.md documents the DefiLlama adapters as "a hand-maintained mirror" kept
+ * The repo documents the DefiLlama adapters as "a hand-maintained mirror" kept
  * honest only by a parity test somebody remembered to write.
  *
  * So the monorepo is the source of truth and the public repo is OUTPUT.
@@ -86,7 +86,8 @@ const FORBIDDEN = [/(^|[/\\])\.env($|\.)/i, /\.key$/i, /\.pem$/i, /(^|[/\\])keys
 
 function walk(dir, out = []) {
   for (const name of readdirSync(dir)) {
-    if (name === 'node_modules' || name === 'dist' || name === '.git') continue
+    // .cache: local scratch from the generator scripts (fetched chain lists, feed pages), gitignored here.
+    if (name === 'node_modules' || name === 'dist' || name === '.git' || name === '.cache') continue
     const p = join(dir, name)
     if (statSync(p).isDirectory()) walk(p, out)
     else out.push(p)

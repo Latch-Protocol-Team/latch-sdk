@@ -8,7 +8,7 @@
    move, so they are not part of that comparison).
 
    WHAT IT IS FOR. The launch wizard is market-cap-first and defaults to a
-   $3.5K-equivalent opening market cap on every chain (CLAUDE.md, owner decision
+   $3.5K-equivalent opening market cap on every chain (owner decision
    2026-09-20). Turning "$3,500" into a price per token needs exactly one number per
    chain: what one unit of the chain's native currency is worth in dollars. This table
    is where that number's SOURCES live; `src/price/` is where they are read.

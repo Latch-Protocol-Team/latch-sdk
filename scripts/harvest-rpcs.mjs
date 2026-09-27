@@ -116,7 +116,7 @@ const normalise = (u) => u.trim().replace(/\/+$/, '')
 /**
  * A rejected URL still has to be REPORTED, and a report is a file we commit. Printing the
  * credential we just refused to ship would publish it just as surely as shipping it would — the
- * rule in CLAUDE.md is "never commit an RPC URL containing an API key", and an evidence file is a
+ * rule is "never commit an RPC URL containing an API key", and an evidence file is a
  * commit. So every key-shaped path segment is replaced by its length before the URL reaches stdout
  * or the artefact; the host and shape stay legible, which is all a reader needs to judge the call.
  *

@@ -7,9 +7,9 @@
 // artifacts at git 24de311, before every Latch duration moved to
 // `block.timestamp` (Option B, 2026-09-13).
 //
-// They describe bytecode that is STILL DEPLOYED: Robinhood (4663) kit
-// 0x2a4CA9809C873f9a7eb132cb073710F26D0bBcA7 and hook
-// 0x8b4F6699F1D2E1b368aDFb802D14adf4e474575c. Their `startBlock` / `decayBlocks`
+// They describe bytecode that is still ON CHAIN, though RETIRED with Robinhood's first stack
+// (2026-09-27): kit 0x2a4CA9809C873f9a7eb132cb073710F26D0bBcA7 and hook
+// 0x8b4F6699F1D2E1b368aDFb802D14adf4e474575c. No address book entry names them now. Their `startBlock` / `decayBlocks`
 // are on the CONTRACT block clock (Ethereum L1 blocks on Nitro), and the kit
 // converts preset seconds at its declared `blockTimeCentis`.
 //

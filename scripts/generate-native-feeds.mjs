@@ -12,7 +12,7 @@
 // WHY THIS EXISTS
 // ---------------------------------------------------------------------------
 // The launch wizard is market-cap-first and defaults to a $3.5K-equivalent opening
-// market cap on every chain (CLAUDE.md, owner decision 2026-09-20). Turning "$3,500"
+// market cap on every chain (owner decision 2026-09-20). Turning "$3,500"
 // into a price per token needs one number per chain: how many dollars one unit of the
 // chain's native currency is worth. `deployments/stockFeeds.ts` is EQUITY feeds only and
 // answers nothing about ETH, BNB, MON or XPL.
@@ -85,7 +85,7 @@ const OUT_FILE = join(ROOT, "src", "deployments", "nativeFeeds.ts");
  *
  * `rpcKey` is the key in `CHAIN_RPCS`. Arc mainnet is deliberately absent from that table
  * (it is not one of the target chains), so it carries its own endpoints here — the owner's
- * `rpc.mainnet.arc.io`, which CLAUDE.md records as live on 2026-09-20.
+ * `rpc.mainnet.arc.io`, which was confirmed live on 2026-09-20.
  */
 const CHAINS = {
   ethereum: { chainId: 1, file: "feeds-mainnet", rpcKey: "ethereum" },
@@ -791,7 +791,7 @@ const header = `// SPDX-License-Identifier: MIT
    move, so they are not part of that comparison).
 
    WHAT IT IS FOR. The launch wizard is market-cap-first and defaults to a
-   $3.5K-equivalent opening market cap on every chain (CLAUDE.md, owner decision
+   $3.5K-equivalent opening market cap on every chain (owner decision
    2026-09-20). Turning "$3,500" into a price per token needs exactly one number per
    chain: what one unit of the chain's native currency is worth in dollars. This table
    is where that number's SOURCES live; \`src/price/\` is where they are read.

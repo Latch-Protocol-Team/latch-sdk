@@ -76,7 +76,9 @@ const CANONICAL = {
   // Safe exist on this chain yet?", so it must ask about the Safe we will actually deploy under —
   // not the superseded 2-of-3 `0x715a…3432`, which exists on 4663/Sepolia and nowhere new.
   latchSafe: "0xeA7903Ed7d5FAE93CE1500ED2c4df138bDF0a038",
-  create3Factory: "0x6ffdf9a3df7e9dd55bad2e60c7405cd181005633",
+  // The Create3Factory of the release stack (Base and the redeployed Robinhood). The first
+  // Robinhood stack's factory 0x6ffd…5633 is retired.
+  create3Factory: "0x501D3a1F7674BE9f4BCe56bE81Dc3CafA1E51BD1",
 };
 
 // Wrapped native per chain id: address + the page it was read from, read 2026-09-18.
