@@ -48,7 +48,7 @@ import {
   type PublicClient,
 } from "viem";
 
-import { LATCH_CHAIN_IDS, getDeployment, type LatchChainId } from "../../deployments/index.js";
+import { LATCH_CHAIN_IDS, getDeployment, launchpadV2Addresses, type LatchChainId } from "../../deployments/index.js";
 
 import { LATCH_PAD_ABI, LATCH_PAD_FACTORY_ABI } from "../generated/abi.js";
 import { PRESET, PRESET_NAMES, type PresetName } from "../presets.js";
@@ -60,7 +60,7 @@ import { BIN_SHAPE, BIN_SHAPE_NAMES, type BinShapeName, type TenantConfigV2 } fr
 /** The version this module writes. A reader refuses an unknown version rather than guessing fields. */
 export const PAD_BRAND_VERSION = 1;
 
-/** The eight theme packs a Latch-hosted pad site ships. Names are Latch's own. */
+/** The theme packs a Latch-hosted pad site ships: eight to begin with, more appended since. Names are Latch's own. */
 export const PAD_THEMES = {
   mono: "black screen, monospace type, blinking cursor",
   press: "paper, serif headlines, column rules",
@@ -70,6 +70,14 @@ export const PAD_THEMES = {
   soft: "rounded shapes, pastel fills",
   chrome: "chrome gradients, sparkles, bubble type",
   hazard: "caution tape, condensed type",
+  /* The four trading packs, added 2026-09-28. APPENDED: a brand stores the name, and an SDK that
+     predates a name refuses the brand that carries it, so names are never renamed or removed. */
+  degen: "near-black, neon green, pill buttons",
+  stonks: "trading-floor black, ticker green, tabular numerals",
+  candle: "chart-desk charcoal, blue accent, grid lines",
+  moon: "deep-space gradient, gold accent, soft glow",
+  /* Added 2026-09-28, appended like the four above. */
+  bullion: "exchange black, gold accent, hairline cards, mono figures",
 } as const;
 export type PadTheme = keyof typeof PAD_THEMES;
 export const PAD_THEME_NAMES = Object.keys(PAD_THEMES) as readonly PadTheme[];
@@ -179,6 +187,17 @@ export interface PadBrand {
    * operator's word about which tokens its site should show.
    */
   readonly tokenLists?: readonly string[];
+  /**
+   * The owner's word that this site is a DEMO: a showcase of what a site does, not a venue its
+   * owner vouches for. The hosted site wears a "Demo" tag beside its name. Absent or false, no
+   * tag. It changes nothing a contract does.
+   */
+  readonly demo?: boolean;
+}
+
+/** Whether a brand marks its site as a demo. Never a default: no brand, no tag. */
+export function padIsDemo(brand: PadBrand | null | undefined): boolean {
+  return brand?.demo === true;
 }
 
 /** The most token-list URLs a brand may carry. */
@@ -343,6 +362,9 @@ export function validatePadBrand(brand: unknown): readonly PadBrandIssue[] {
         else if (kind === "font" && !FONT_RE.test(v)) issues.push({ field: `widget.vars.${k}`, message: "must be a plain font-family list (letters, digits, spaces, commas, quotes, hyphens; at most 80 characters)" });
       }
     }
+  }
+  if (b["demo"] !== undefined && typeof b["demo"] !== "boolean") {
+    issues.push({ field: "demo", message: "must be true or false" });
   }
   const host = b["customDomain"];
   if (host !== undefined && (typeof host !== "string" || !HOSTNAME_RE.test(host))) {
@@ -840,6 +862,46 @@ export async function readPadNames(
   return addresses.map((address, i) => ({ address, name: names[i] as string }));
 }
 
+/**
+ * Every pad of SEVERAL factories, read live, in factory order then creation order, each address once,
+ * each with the factory that made it (a pad is a tenant of THAT factory's kit, not of the current one).
+ * A chain serves more than one kit generation, and each generation has its own `LatchPadFactory`;
+ * a Launchpad made on an earlier factory keeps working on its own kit, so a directory lists both.
+ */
+export async function readPadsAcross(client: PublicClient, factories: readonly Address[]): Promise<readonly (PadRecord & { readonly factory: Address })[]> {
+  const distinct = uniqueByAddress(factories.map((address) => ({ address }))).map((f) => f.address);
+  const lists = await Promise.all(distinct.map(async (factory) => (await readPads(client, factory)).map((p) => ({ ...p, factory }))));
+  return uniqueByAddress(lists.flat());
+}
+
+/**
+ * `readPadNames` over several factories, in factory order then deployment order, each address once.
+ * Slugs are one namespace per chain whichever factory made a pad, so `assignPadSlugs` is applied to
+ * the combined list, never per factory: pass the factories OLDEST FIRST (`padSlugFactoriesOn`), so a
+ * site keeps the slug it already had.
+ */
+export async function readPadNamesAcross(
+  client: PublicClient,
+  factories: readonly Address[],
+  opts: { readonly multicallAddress?: Address | null; readonly pageSize?: number } = {},
+): Promise<readonly { readonly address: Address; readonly name: string }[]> {
+  const distinct = uniqueByAddress(factories.map((address) => ({ address }))).map((f) => f.address);
+  const lists = await Promise.all(distinct.map((f) => readPadNames(client, f, opts)));
+  return uniqueByAddress(lists.flat());
+}
+
+function uniqueByAddress<T extends { readonly address: Address }>(rows: readonly T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const r of rows) {
+    const k = r.address.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(r);
+  }
+  return out;
+}
+
 /** `readPadNames` then `assignPadSlugs`: the whole slug table of a factory. */
 export async function readPadSlugs(client: PublicClient, factory: Address, opts?: { readonly multicallAddress?: Address | null }): Promise<readonly PadSlugEntry[]> {
   return assignPadSlugs(await readPadNames(client, factory, opts));
@@ -933,9 +995,32 @@ export async function readPadOrigin(client: PublicClient, factory: Address, pad:
   return /^0x0{40}$/i.test(creator) ? null : { creator, userSalt };
 }
 
-/** The address book's `LatchPadFactory` on `chainId`, or `null` where none is deployed. */
+/**
+ * The address book's CURRENT `LatchPadFactory` on `chainId`, or `null` where none is deployed. This is
+ * the factory a NEW Launchpad is created on. To list or resolve existing Launchpads use
+ * `padFactoriesOn`, which also covers the factories of earlier kit generations.
+ */
 export function padFactoryOn(chainId: number): Address | null {
   return getDeployment(chainId)?.launchpadV2.padFactory ?? null;
+}
+
+/**
+ * Every `LatchPadFactory` the address book serves on `chainId`: the current one first, then those
+ * of retired kit generations. A Launchpad made on any of them still exists and still works.
+ */
+export function padFactoriesOn(chainId: number): readonly Address[] {
+  const d = getDeployment(chainId);
+  return d === undefined ? [] : launchpadV2Addresses(d, "padFactory");
+}
+
+/**
+ * The same factories in SLUG order: the oldest generation first, the current one last. Slugs are one
+ * namespace per chain, and the first pad to take a name keeps the bare slug; a Launchpad that already
+ * has a link must not lose it to a newer site of the same name on a newer factory. Every surface that
+ * resolves `/p/<name>` (the API, the site) builds its table from this order, so they agree.
+ */
+export function padSlugFactoriesOn(chainId: number): readonly Address[] {
+  return [...padFactoriesOn(chainId)].reverse();
 }
 
 /** A `createPad` transaction prepared for one chain, from live reads on that chain. */
@@ -1075,39 +1160,62 @@ export async function readPadAcrossChains(args: {
   readonly fromChainId?: LatchChainId;
   readonly clients: Partial<Record<LatchChainId, PublicClient>>;
   readonly chainIds?: readonly LatchChainId[];
-  /** Overrides the address book's factory per chain (a devnet). */
+  /** Overrides the address book's factory per chain (a devnet): ONE factory, used for reading and creating. */
   readonly factoryOn?: (chainId: LatchChainId) => Address | null;
+  /**
+   * Overrides every factory served per chain, the one new Launchpads are created on FIRST. Defaults to
+   * `[factoryOn(id)]` when `factoryOn` is given, else `padFactoriesOn` (current generation, then retired).
+   */
+  readonly factoriesOn?: (chainId: LatchChainId) => readonly Address[];
 }): Promise<readonly PadOnChain[]> {
-  const lookup = args.factoryOn ?? padFactoryOn;
+  const single = args.factoryOn;
+  const all: (chainId: LatchChainId) => readonly Address[] =
+    args.factoriesOn ??
+    (single !== undefined
+      ? (id) => {
+          const f = single(id);
+          return f === null ? [] : [f];
+        }
+      : padFactoriesOn);
   const chainIds = args.chainIds ?? LATCH_CHAIN_IDS;
 
   let identity = args.identity ?? null;
   if (identity === null) {
     if (args.pad === undefined) throw new Error("readPadAcrossChains needs either `identity` or `pad`");
-    const from = args.fromChainId ?? chainIds.find((id) => args.clients[id] !== undefined && lookup(id) !== null);
+    const from = args.fromChainId ?? chainIds.find((id) => args.clients[id] !== undefined && all(id).length > 0);
     if (from === undefined) throw new Error("readPadAcrossChains: no chain has both a client and a factory to resolve the identity from");
-    const factory = lookup(from);
+    const factories = all(from);
     const client = args.clients[from];
-    if (factory === null || client === undefined) throw new Error(`readPadAcrossChains: chain ${from} has no factory or no client`);
-    identity = await readPadOrigin(client, factory, args.pad);
-    if (identity === null) throw new Error(`${args.pad} is not a Launchpad of the factory on chain ${from}`);
+    if (factories.length === 0 || client === undefined) throw new Error(`readPadAcrossChains: chain ${from} has no factory or no client`);
+    /* A Launchpad of an earlier generation's factory answers only on that factory: ask each in turn. */
+    for (const factory of factories) {
+      identity = await readPadOrigin(client, factory, args.pad);
+      if (identity !== null) break;
+    }
+    if (identity === null) throw new Error(`${args.pad} is not a Launchpad of any factory on chain ${from}`);
   }
   const { creator, userSalt } = identity;
 
   return Promise.all(
     chainIds.map(async (chainId): Promise<PadOnChain> => {
-      const factory = lookup(chainId);
-      if (factory === null) return { chainId, status: "no-factory" };
+      const factories = all(chainId);
+      if (factories.length === 0) return { chainId, status: "no-factory" };
       const client = args.clients[chainId];
       if (client === undefined) return { chainId, status: "no-client" };
       try {
-        // THIS chain's address for this identity, from THIS chain's factory, read ON CHAIN.
+        // THIS chain's address for this identity, from THIS chain's factories, read ON CHAIN.
         // `predictPad` rather than a local computation because the implementation address is part
         // of the clone's init code — predicting off-chain would bake in an assumption about a
-        // second address that also moves when CreateX is absent.
+        // second address that also moves when CreateX is absent. Every served factory is asked: a
+        // Launchpad opened on an earlier generation's factory lives at THAT factory's address.
+        for (const factory of factories) {
+          const pad = await readPredictPad(client, factory, creator, userSalt);
+          const isPad = await client.readContract({ address: factory, abi: LATCH_PAD_FACTORY_ABI, functionName: "isPad", args: [pad] });
+          if (isPad) return { chainId, status: "live", factory, pad, record: await readPad(client, pad) };
+        }
+        /* Absent from every factory: where it WOULD be opened is the current factory, the first. */
+        const factory = factories[0]!;
         const pad = await readPredictPad(client, factory, creator, userSalt);
-        const isPad = await client.readContract({ address: factory, abi: LATCH_PAD_FACTORY_ABI, functionName: "isPad", args: [pad] });
-        if (isPad) return { chainId, status: "live", factory, pad, record: await readPad(client, pad) };
         return { chainId, status: "absent", factory, pad, fee: await readPadFactoryFee(client, factory) };
       } catch (e) {
         return { chainId, status: "error", error: e instanceof Error ? e.message : String(e) };

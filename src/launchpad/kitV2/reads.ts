@@ -5,7 +5,7 @@
    kit's address.
 
    Proven on a Robinhood (4663) anvil fork against a real kit (2026-09-17) as
-   the create-latch-dex template's own modules; moved here so the template,
+   the create-latch-app template's own modules; moved here so the template,
    the Latch dapp's hosted pad sites and the widgets read through one
    implementation.
 
@@ -17,9 +17,21 @@
    NOTHING HERE IS A SALE. There is no cap, no allocation and no claim. What is
    read is a schedule per pool, the fee the guard charges right now, and the
    frozen split of what each locked position earns.
+
+   TWO GENERATIONS OF GUARD (`./guardGeneration.js`). On an "lp-fee" guard the
+   fee is an LP fee and reaches its parties through the lockers. On a
+   "quote-fee" guard the guard takes it, in the quote currency, into a pot of
+   its own that is split by `getFeeSplit(poolId)`; on a buy it leaves a share
+   of it to the pool as the pool's LP fee, which the locked position earns and
+   the locker pays out. That share is READ (`LP_SHARE_BPS`, `currentFeeParts`),
+   and a guard that does not answer has a split nobody knows: `null`, never
+   zero. Which generation a leg runs on is read from the guard's bitmap, and
+   the functions only one generation has are called only after that read.
    ============================================================================ */
 
-import { BaseError, ContractFunctionRevertedError, ExecutionRevertedError, erc20Abi, getAbiItem, type Address, type Hex, type PublicClient } from "viem";
+import { erc20Abi, getAbiItem, type Address, type Hex, type PublicClient } from "viem";
+
+import { isRevertError } from "../../chains/revert.js";
 
 import { readContractClock } from "../../chains/clock.js";
 import {
@@ -35,6 +47,8 @@ import { LATCH_LAUNCH_REGISTRY_ABI } from "../../registry/generated/abi.js";
 import type { PoolKey } from "../../types/poolKey.js";
 import { readLaunchValue, type DecodedTenantConfig, type LaunchValueQuote } from "./fees.js";
 import { readKitV2Caps } from "./fees.js";
+import { readGuardFeeParts, readGuardLpShareBps, splitGuardPot, type GuardFeeParts } from "./guardFees.js";
+import { guardGenerationOf, readGuardBitmap, type GuardGenerationRead } from "./guardGeneration.js";
 import { TIMESTAMP_CLOCK_MODE } from "../../revshare/pendingConfig.js";
 import type { KitV2LegEnv } from "./legs.js";
 import { LEG_KIND, type KitV2Caps } from "./types.js";
@@ -118,7 +132,39 @@ export async function readKitV2Env(client: PublicClient, kit: Address): Promise<
       read("protocolFeeRecipient"),
     ]);
   if (mode !== TIMESTAMP_CLOCK_MODE) throw new KitV2ClockError(kit, mode);
-  return { kit, clHook, binHook, clPoolManager, binPoolManager, clPositionManager, binPositionManager, clLocker, binLocker, tokenFactory, launchRegistry, protocolFeeRecipient };
+  /* What each guard registers: a leg's pool id contains it, and it says which generation the guard is. */
+  const [clHookBitmap, binHookBitmap] = await Promise.all([readGuardBitmap(client, clHook), readGuardBitmap(client, binHook)]);
+  return {
+    kit,
+    clHook,
+    binHook,
+    clPoolManager,
+    binPoolManager,
+    clPositionManager,
+    binPositionManager,
+    clLocker,
+    binLocker,
+    tokenFactory,
+    launchRegistry,
+    protocolFeeRecipient,
+    clHookBitmap,
+    binHookBitmap,
+  };
+}
+
+/** `env` with both guards' bitmaps: the ones it carries, and a read for any it does not (an env written by hand). */
+async function withGuardBitmaps(client: PublicClient, env: KitV2Env): Promise<KitV2Env> {
+  if (env.clHookBitmap !== undefined && env.binHookBitmap !== undefined) return env;
+  const [clHookBitmap, binHookBitmap] = await Promise.all([
+    env.clHookBitmap !== undefined ? env.clHookBitmap : readGuardBitmap(client, env.clHook),
+    env.binHookBitmap !== undefined ? env.binHookBitmap : readGuardBitmap(client, env.binHook),
+  ]);
+  return { ...env, clHookBitmap, binHookBitmap };
+}
+
+/** The generation of the guard a leg of `kind` runs on, from the env's bitmaps. */
+function guardGenerationIn(env: KitV2Env, kind: "CL" | "Bin"): GuardGenerationRead {
+  return guardGenerationOf(kind === "CL" ? env.clHookBitmap : env.binHookBitmap, kind);
 }
 
 /** Every number a launch is validated against, read off the deployed contracts. */
@@ -137,6 +183,20 @@ export interface KitV2Limits {
   readonly locker: { readonly minProtocolBps: number; readonly maxProtocolBps: number; readonly maxIntegratorBps: number };
   /** The guards' creator-tax bounds (`LaunchTaxModule` constants; the kit asserts both guards agree). */
   readonly tax: TaxBounds;
+  /**
+   * The bounds a "quote-fee" guard puts on the trade fee's split, which the kit
+   * copies from the lock's split: a launch has to satisfy these AND `locker`.
+   * `null` on an "lp-fee" guard (no fee split there) and on one that could not be classified.
+   */
+  readonly feeSplit: { readonly minProtocolBps: number; readonly maxProtocolBps: number; readonly maxIntegratorBps: number } | null;
+  /**
+   * Each guard's `LP_SHARE_BPS`: the share of the trade fee a launch on it leaves
+   * to the pool's liquidity providers on buys, in basis points. It is the
+   * guard's, fixed when it was deployed: a launch cannot choose it. `null` for a
+   * guard that is not "quote-fee" (an "lp-fee" pool charges the whole fee as its
+   * LP fee) and for one that did not answer: unknown, never zero.
+   */
+  readonly lpShareBps: { readonly CL: number | null; readonly Bin: number | null };
   readonly maxIntegratorLaunchFeeWei: bigint;
   readonly maxLaunchFeeWei: bigint;
   /** The factory's byte limits on the token's strings. */
@@ -176,10 +236,12 @@ export interface ReadKitV2LimitsOptions {
 
 /** The kit's, guards', lockers' and factory's limits. Nothing here is hardcoded. */
 export async function readKitV2Limits(client: PublicClient, kit: Address, opts: ReadKitV2LimitsOptions = {}): Promise<KitV2Limits> {
-  const env = opts.env ?? (await readKitV2Env(client, kit));
+  const env = await withGuardBitmaps(client, opts.env ?? (await readKitV2Env(client, kit)));
   const tenant = opts.tenant ?? null;
   const direct = opts.direct;
-  const [caps, minDecay, maxDecay, maxInitial, maxFinal, maxStartDelay, minProtocol, maxProtocol, maxIntegrator, maxIntegratorFee, maxLaunchFee, maxName, maxSymbol, maxUri, value, taxMax, taxMinProtocol, taxMaxProtocol, taxMaxIntegrator, taxMaxDuration] =
+  /* `MIN_FEE_PROTOCOL_BPS` exists on a quote-fee guard only, so it is read only there. */
+  const quoteFee = guardGenerationIn(env, "CL") === "quote-fee";
+  const [caps, minDecay, maxDecay, maxInitial, maxFinal, maxStartDelay, minProtocol, maxProtocol, maxIntegrator, maxIntegratorFee, maxLaunchFee, maxName, maxSymbol, maxUri, value, taxMax, taxMinProtocol, taxMaxProtocol, taxMaxIntegrator, taxMaxDuration, feeMinProtocol, clLpShare, binLpShare] =
     await Promise.all([
       readKitV2Caps(client, kit),
       client.readContract({ address: env.clHook, abi: LAUNCH_GUARD_HOOK_ABI, functionName: "MIN_DECAY_SECONDS" }),
@@ -201,6 +263,10 @@ export async function readKitV2Limits(client: PublicClient, kit: Address, opts: 
       client.readContract({ address: env.clHook, abi: LAUNCH_GUARD_HOOK_ABI, functionName: "MAX_PROTOCOL_BPS" }),
       client.readContract({ address: env.clHook, abi: LAUNCH_GUARD_HOOK_ABI, functionName: "MAX_INTEGRATOR_BPS" }),
       client.readContract({ address: env.clHook, abi: LAUNCH_GUARD_HOOK_ABI, functionName: "MAX_TAX_DURATION_SECONDS" }),
+      quoteFee ? client.readContract({ address: env.clHook, abi: LAUNCH_GUARD_HOOK_ABI, functionName: "MIN_FEE_PROTOCOL_BPS" }) : Promise.resolve(null),
+      /* Each guard has its own share, so each is asked, and only where the function can exist. */
+      quoteFee ? readGuardLpShareBps(client, env.clHook) : Promise.resolve(null),
+      guardGenerationIn(env, "Bin") === "quote-fee" ? readGuardLpShareBps(client, env.binHook) : Promise.resolve(null),
     ]);
 
   let tenantAllowedQuotes: Address[] = [];
@@ -251,6 +317,11 @@ export async function readKitV2Limits(client: PublicClient, kit: Address, opts: 
       maxIntegratorBps: Number(taxMaxIntegrator),
       maxTaxDurationSeconds: Number(taxMaxDuration),
     },
+    feeSplit:
+      feeMinProtocol === null
+        ? null
+        : { minProtocolBps: Number(feeMinProtocol), maxProtocolBps: Number(taxMaxProtocol), maxIntegratorBps: Number(taxMaxIntegrator) },
+    lpShareBps: { CL: clLpShare, Bin: binLpShare },
     maxIntegratorLaunchFeeWei: maxIntegratorFee,
     maxLaunchFeeWei: maxLaunchFee,
     token: { maxNameBytes: Number(maxName), maxSymbolBytes: Number(maxSymbol), maxMetadataUriBytes: Number(maxUri) },
@@ -276,12 +347,7 @@ async function nullOnRevert<T>(read: Promise<T>): Promise<T | null> {
   try {
     return await read;
   } catch (error) {
-    if (
-      error instanceof BaseError &&
-      error.walk((x: unknown) => x instanceof ExecutionRevertedError || x instanceof ContractFunctionRevertedError) !== null
-    ) {
-      return null;
-    }
+    if (isRevertError(error)) return null;
     throw error;
   }
 }
@@ -311,7 +377,34 @@ export interface LaunchLegV2 {
   readonly weightBps: number;
   readonly launchTokenSeeded: bigint;
   readonly launchTokenIsCurrency0: boolean;
+  /**
+   * Which guard this leg runs on, from the guard's own bitmap. It decides what
+   * `currentFeePips` IS: on "lp-fee" the pool's LP fee, charged on the swap's
+   * input and paid out through the lock; on "quote-fee" the whole trade fee,
+   * paid in the quote currency, of which `feeParts` says what the pool charges
+   * and what the guard takes. `unknown`: the guard's bitmap is no launch
+   * guard's, or it did not answer; say so, do not pick one.
+   */
+  readonly guardGeneration: GuardGenerationRead;
+  /** The whole trade fee a swap pays now (`currentFee(poolId)`), hundredths of a bip. Both parts of it on a "quote-fee" leg. */
   readonly currentFeePips: number | null;
+  /**
+   * "quote-fee" only: the parts of `currentFeePips`, as the guard answers
+   * `currentFeeParts(poolId)`. On a buy the pool charges `buyLpPips` as its LP
+   * fee and the guard takes `buyGuardPips`; on a sell the pool charges nothing
+   * and the guard takes `sellGuardPips`, the whole fee. Every part is paid in the
+   * quote. `null` on an "lp-fee" leg (the whole fee is the pool's LP fee there),
+   * on an unknown guard, and when the guard did not answer: the split is then
+   * NOT KNOWN, which is not the same as the pool's part being zero.
+   */
+  readonly feeParts: GuardFeeParts | null;
+  /**
+   * "quote-fee" only: the guard's `LP_SHARE_BPS`, the share of the trade fee it
+   * leaves to the pool's liquidity providers on buys, in basis points. Fixed when
+   * the guard was deployed; zero is a real answer. `null` where `feeParts` is
+   * `null` for the same reasons: unknown, never assumed.
+   */
+  readonly lpShareBps: number | null;
   readonly guard: {
     readonly startTime: bigint;
     readonly decaySeconds: number;
@@ -335,6 +428,21 @@ export interface LaunchLegV2 {
     readonly protocolBps: number;
     readonly integratorBps: number;
     readonly live: boolean;
+  } | null;
+  /**
+   * "quote-fee" only: who the guard's trade fee is split between, written once
+   * before the pool was initialized. `null` on an "lp-fee" leg (the split is the
+   * lock's, below), on an unknown guard, and when the read reverted.
+   * `pendingCreator` is the address the creator has nominated to take its share
+   * over, or `null`; nothing moves until that address accepts.
+   */
+  readonly feeSplit: {
+    readonly creator: Address;
+    readonly integrator: Address;
+    readonly creatorBps: number;
+    readonly protocolBps: number;
+    readonly integratorBps: number;
+    readonly pendingCreator: Address | null;
   } | null;
   readonly lock: {
     readonly creator: Address;
@@ -369,6 +477,12 @@ export interface LaunchListing {
 }
 
 export interface LaunchRecordV2 {
+  /**
+   * The `LaunchpadKitV2` that created this launch (the scan's kit). A chain serves more than one
+   * kit generation (`launchpadV2Generations`), so a merged list carries it per launch: the kit's
+   * own reads (`getLaunch`, `reconfigureLaunch`, `feesOwed`) go to THIS address.
+   */
+  readonly kit: Address;
   readonly token: Address;
   readonly tokenMeta: TokenMeta | null;
   /** From `LatchLaunchRegistry.getLaunch(firstLeg.poolId)`; `null` when the record could not be read. */
@@ -427,7 +541,10 @@ interface LegLog {
 async function readLeg(client: PublicClient, env: KitV2Env, leg: LegLog, now: bigint): Promise<LaunchLegV2> {
   const hook = leg.kind === "CL" ? env.clHook : env.binHook;
   const hookAbi = leg.kind === "CL" ? LAUNCH_GUARD_HOOK_ABI : BIN_LAUNCH_GUARD_HOOK_ABI;
-  const [quoteMeta, kitLeg, guard, fee, lock, keyRead, taxRead] = await Promise.all([
+  const guardGeneration = guardGenerationIn(env, leg.kind);
+  /* The fee split and its nominee exist on a quote-fee guard only; nothing else is asked for them. */
+  const quoteFee = guardGeneration === "quote-fee";
+  const [quoteMeta, kitLeg, guard, fee, lock, keyRead, taxRead, feeSplitRead, pendingCreator, feePartsRead] = await Promise.all([
     leg.quote === NATIVE_ADDRESS ? Promise.resolve(null) : readTokenMeta(client, leg.quote),
     client.readContract({ address: env.kit, abi: LAUNCHPAD_KIT_V2_ABI, functionName: "getLeg", args: [leg.poolId] }),
     nullOnRevert(client.readContract({ address: hook, abi: hookAbi, functionName: "getLaunch", args: [leg.poolId] })),
@@ -441,7 +558,25 @@ async function readLeg(client: PublicClient, env: KitV2Env, leg: LegLog, now: bi
         ).then((r) => (r === null ? null : r[0]))
       : nullOnRevert(client.readContract({ address: env.binLocker, abi: LATCH_BIN_LP_LOCKER_ABI, functionName: "getPoolKey", args: [leg.lockId] })),
     nullOnRevert(client.readContract({ address: hook, abi: hookAbi, functionName: "getTax", args: [leg.poolId] })),
+    quoteFee ? nullOnRevert(client.readContract({ address: hook, abi: hookAbi, functionName: "getFeeSplit", args: [leg.poolId] })) : Promise.resolve(null),
+    quoteFee
+      ? nullOnRevert(client.readContract({ address: hook, abi: hookAbi, functionName: "pendingCreator", args: [BigInt(leg.poolId)] }))
+      : Promise.resolve(null),
+    /* Who receives which part of the fee: asked of a quote-fee guard only, and `null` when it does not answer. */
+    quoteFee ? readGuardFeeParts(client, hook, leg.poolId) : Promise.resolve(null),
   ]);
+  /* `protocolBps` is never zero on a written split (the floor), so zero is "not written". */
+  const feeSplit: LaunchLegV2["feeSplit"] =
+    feeSplitRead === null || feeSplitRead.protocolBps === 0
+      ? null
+      : {
+          creator: feeSplitRead.creator,
+          integrator: feeSplitRead.integrator,
+          creatorBps: feeSplitRead.creatorBps,
+          protocolBps: feeSplitRead.protocolBps,
+          integratorBps: feeSplitRead.integratorBps,
+          pendingCreator: pendingCreator === null || pendingCreator.toLowerCase() === NATIVE_ADDRESS ? null : pendingCreator,
+        };
   const tax: LaunchLegV2["tax"] =
     taxRead === null || taxRead.expiresAt === 0
       ? null
@@ -490,9 +625,13 @@ async function readLeg(client: PublicClient, env: KitV2Env, leg: LegLog, now: bi
     weightBps: leg.weightBps,
     launchTokenSeeded: leg.launchTokenSeeded,
     launchTokenIsCurrency0: kitLeg.launchTokenIsCurrency0,
+    guardGeneration,
     currentFeePips: fee === null ? null : Number(fee),
+    feeParts: feePartsRead === null ? null : feePartsRead.parts,
+    lpShareBps: feePartsRead === null ? null : feePartsRead.lpShareBps,
     guard: guardRead,
     tax,
+    feeSplit,
     lock:
       lock === null
         ? null
@@ -576,7 +715,7 @@ const sameAddress = (a: string, b: string): boolean => a.toLowerCase() === b.toL
 
 /** Every launch the kit created (filtered), newest first, with every leg read live. */
 export async function readKitV2Launches(client: PublicClient, kit: Address, opts: ReadKitV2LaunchesOptions): Promise<LaunchScanV2> {
-  const env = opts.env ?? (await readKitV2Env(client, kit));
+  const env = await withGuardBitmaps(client, opts.env ?? (await readKitV2Env(client, kit)));
   const args: { tenant?: Address; creator?: Address } = {};
   if (opts.tenant !== undefined) args.tenant = opts.tenant;
   if (opts.creator !== undefined) args.creator = opts.creator;
@@ -646,6 +785,7 @@ export async function readKitV2Launches(client: PublicClient, kit: Address, opts
             ? "decaying"
             : "settled";
       return {
+        kit: env.kit,
         token,
         tokenMeta,
         listing,
@@ -683,7 +823,13 @@ export interface EarningsV2 {
     readonly meta: TokenMeta | null;
     readonly amount: bigint;
   }[];
-  /** Locks where `account` is creator or integrator: `collectFees(lockId)` moves their earned fees into `claimable`. */
+  /**
+   * Locks where `account` is creator or integrator: `collectFees(lockId)` moves their earned fees into `claimable`.
+   * On a "quote-fee" leg a lock earns the POOL's part of the trade fee: a share of what buys pay
+   * (`lpShareBps` of it), in the quote, and nothing from sells. Where that share is zero a lock earns
+   * no trade fee and `collectFees` finds nothing (a Bin lock can still earn the composition fee of an
+   * active-bin mint). The guard's part of that leg's trade fee is under `fee`.
+   */
   readonly locks: readonly {
     readonly locker: "CL" | "Bin";
     readonly lockId: bigint;
@@ -692,22 +838,33 @@ export interface EarningsV2 {
     readonly role: "creator" | "integrator" | "both";
     readonly currency0: Address;
     readonly currency1: Address;
+    readonly guardGeneration: GuardGenerationRead;
+    /**
+     * The leg's `lpShareBps`: on a "quote-fee" leg, the share of the trade fee the pool charges on
+     * buys, which this lock earns. `null` on an "lp-fee" leg (the lock earns the whole fee there)
+     * and where the guard did not answer.
+     */
+    readonly lpShareBps: number | null;
   }[];
   /**
-   * The creator tax, read off the guards. `claimable` is what `claim(currency, to)` on that guard pays
-   * `account` now; `pools` are the legs where `account` is a tax bucket, with each pool's UNSETTLED
-   * pot per currency (`settleTax(poolId, currency)` splits it; `claimFrom(pools, currency, to)` does
-   * both). `account`'s share of a pot is `pot * bps / 10000`, floored, before the protocol takes the
-   * remainder.
+   * What `claim(currency, to)` on each guard pays `account` now. A guard keeps ONE balance per account
+   * and currency: on a "quote-fee" guard the settled trade fee and the settled creator tax are both in
+   * it, and one `claim` withdraws both. A row exists for every currency of a pool where `account` is a
+   * party to the tax or to the trade fee.
+   */
+  readonly guardClaimable: readonly GuardClaimableV2[];
+  /**
+   * The creator tax, read off the guards. `pools` are the legs where `account` is a tax bucket, with
+   * each pool's UNSETTLED pot per currency (`settleTax(poolId, currency)` splits it;
+   * `claimFrom(pools, currency, to)` does both). `account`'s share of a pot is `pot * bps / 10000`,
+   * floored, before the protocol takes the remainder.
    */
   readonly tax: {
-    readonly claimable: readonly {
-      readonly guard: "CL" | "Bin";
-      readonly hook: Address;
-      readonly currency: Address;
-      readonly meta: TokenMeta | null;
-      readonly amount: bigint;
-    }[];
+    /**
+     * The same rows as `guardClaimable`, under the name this had before the guards took a trade fee.
+     * Never add the two together: they are one balance read once.
+     */
+    readonly claimable: readonly GuardClaimableV2[];
     readonly pools: readonly {
       readonly guard: "CL" | "Bin";
       readonly hook: Address;
@@ -721,6 +878,43 @@ export interface EarningsV2 {
       readonly pending: readonly { readonly currency: Address; readonly meta: TokenMeta | null; readonly amount: bigint }[];
     }[];
   };
+  /**
+   * The GUARD's part of the trade fee of "quote-fee" legs, read off the guards (the pool's part, a
+   * share of what buys pay, is earned by the lock: `locks`, `claimable`). `pools` are the legs where `account` is the
+   * fee split's creator or integrator. The fee is taken in the pool's QUOTE currency only, so `pending`
+   * has one row: `amount` is the pool's whole UNSETTLED pot and `share` is what settling it now would
+   * credit `account` (its shares floored, as the guard floors them). `settleFee(poolId, currency)`
+   * splits the pot; `claimFrom(pools, currency, to)` settles fee and tax and withdraws. What is already
+   * settled is in `guardClaimable`. Empty for an account whose launches all run on "lp-fee" guards:
+   * their trade fee is under `locks` and `claimable`.
+   */
+  readonly fee: {
+    readonly pools: readonly {
+      readonly guard: "CL" | "Bin";
+      readonly hook: Address;
+      readonly poolId: Hex;
+      readonly token: Address;
+      readonly tokenMeta: TokenMeta | null;
+      readonly role: "creator" | "integrator" | "both";
+      /** `account`'s share of the fee in basis points: both buckets added when it holds both. */
+      readonly bps: number;
+      readonly pending: readonly {
+        readonly currency: Address;
+        readonly meta: TokenMeta | null;
+        readonly amount: bigint;
+        readonly share: bigint;
+      }[];
+    }[];
+  };
+}
+
+/** One balance on one guard: what `claim(currency, to)` there pays the account. */
+export interface GuardClaimableV2 {
+  readonly guard: "CL" | "Bin";
+  readonly hook: Address;
+  readonly currency: Address;
+  readonly meta: TokenMeta | null;
+  readonly amount: bigint;
 }
 
 /** Everything `account` can claim from the launches in `scan`, read live. */
@@ -745,6 +939,8 @@ export async function readKitV2Earnings(client: PublicClient, scan: LaunchScanV2
         role: isCreator && isIntegrator ? "both" : isCreator ? "creator" : "integrator",
         currency0,
         currency1,
+        guardGeneration: leg.guardGeneration,
+        lpShareBps: leg.lpShareBps,
       });
       for (const c of [currency0, currency1]) {
         const key = `${leg.kind}:${c.toLowerCase()}`;
@@ -783,7 +979,47 @@ export async function readKitV2Earnings(client: PublicClient, scan: LaunchScanV2
     }
   }
 
-  const [kitFeesOwed, amounts, taxAmounts, taxPending] = await Promise.all([
+  /* The trade fee, on quote-fee legs only: `getFeeSplit` and `pendingFee` do not exist anywhere else. */
+  const feePools: {
+    guard: "CL" | "Bin";
+    hook: Address;
+    poolId: Hex;
+    token: Address;
+    tokenMeta: TokenMeta | null;
+    isCreator: boolean;
+    isIntegrator: boolean;
+    creatorBps: number;
+    integratorBps: number;
+    currency: Address;
+    meta: TokenMeta | null;
+  }[] = [];
+  for (const launch of scan.launches) {
+    for (const leg of launch.legs) {
+      if (leg.guardGeneration !== "quote-fee" || leg.feeSplit === null) continue;
+      const isCreator = leg.feeSplit.creatorBps > 0 && same(leg.feeSplit.creator, account);
+      const isIntegrator = leg.feeSplit.integratorBps > 0 && same(leg.feeSplit.integrator, account);
+      if (!isCreator && !isIntegrator) continue;
+      const hook = leg.kind === "CL" ? env.clHook : env.binHook;
+      feePools.push({
+        guard: leg.kind,
+        hook,
+        poolId: leg.poolId,
+        token: launch.token,
+        tokenMeta: launch.tokenMeta,
+        isCreator,
+        isIntegrator,
+        creatorBps: leg.feeSplit.creatorBps,
+        integratorBps: leg.feeSplit.integratorBps,
+        /* The guard takes its fee in the quote, on every swap shape. */
+        currency: leg.quote,
+        meta: leg.quoteMeta,
+      });
+      const key = `${leg.kind}:${leg.quote.toLowerCase()}`;
+      if (!taxCurrencies.has(key)) taxCurrencies.set(key, { guard: leg.kind, hook, currency: leg.quote, meta: leg.quoteMeta });
+    }
+  }
+
+  const [kitFeesOwed, amounts, taxAmounts, taxPending, feePending] = await Promise.all([
     client.readContract({ address: env.kit, abi: LAUNCHPAD_KIT_V2_ABI, functionName: "feesOwed", args: [account] }),
     Promise.all(
       [...currencies.values()].map((c) =>
@@ -806,14 +1042,44 @@ export async function readKitV2Earnings(client: PublicClient, scan: LaunchScanV2
         ),
       ),
     ),
+    Promise.all(
+      feePools.map((pool) =>
+        client.readContract({ address: pool.hook, abi: LAUNCH_GUARD_HOOK_ABI, functionName: "pendingFee", args: [pool.poolId, pool.currency] }),
+      ),
+    ),
   ]);
+  const guardClaimable: GuardClaimableV2[] = [...taxCurrencies.values()].map((c, i) => ({ ...c, amount: taxAmounts[i] ?? 0n }));
   return {
     account,
     kitFeesOwed,
     claimable: [...currencies.values()].map((c, i) => ({ ...c, amount: amounts[i] ?? 0n })),
     locks,
+    guardClaimable,
+    fee: {
+      pools: feePools.map((pool, i) => {
+        const pot = feePending[i] ?? 0n;
+        const split = splitGuardPot(pot, { creatorBps: pool.creatorBps, integratorBps: pool.integratorBps });
+        return {
+          guard: pool.guard,
+          hook: pool.hook,
+          poolId: pool.poolId,
+          token: pool.token,
+          tokenMeta: pool.tokenMeta,
+          role: pool.isCreator && pool.isIntegrator ? "both" : pool.isCreator ? "creator" : "integrator",
+          bps: (pool.isCreator ? pool.creatorBps : 0) + (pool.isIntegrator ? pool.integratorBps : 0),
+          pending: [
+            {
+              currency: pool.currency,
+              meta: pool.meta,
+              amount: pot,
+              share: (pool.isCreator ? split.toCreator : 0n) + (pool.isIntegrator ? split.toIntegrator : 0n),
+            },
+          ],
+        };
+      }),
+    },
     tax: {
-      claimable: [...taxCurrencies.values()].map((c, i) => ({ ...c, amount: taxAmounts[i] ?? 0n })),
+      claimable: guardClaimable,
       pools: taxPools.map((pool, i) => ({
         guard: pool.guard,
         hook: pool.hook,

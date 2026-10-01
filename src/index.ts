@@ -245,6 +245,7 @@ export {
   HOSTNAME_RE,
   padDexScopeOf,
   padHostnameOf,
+  padIsDemo,
   padKindOf,
   PAD_BRAND_VERSION,
   PAD_DEX_SCOPES,
@@ -291,6 +292,8 @@ export {
   padCloneInitCode,
   padCreate2Salt,
   padFactoryOn,
+  padFactoriesOn,
+  padSlugFactoriesOn,
   padUserSaltFromLabel,
   predictPadAddress,
   prepareCreatePad,
@@ -315,6 +318,8 @@ export {
   padSlugFor,
   previewPadSlug,
   readPadNames,
+  readPadNamesAcross,
+  readPadsAcross,
   readPadSlugs,
   slugOf,
   /* Kit v2 reads: env, limits, launches, earnings - one implementation for
@@ -326,6 +331,14 @@ export {
   readKitV2Env,
   readKitV2Launches,
   readKitV2Limits,
+  /* Several kit generations on one chain: read every served kit and merge (generations.ts). */
+  envOfLaunch,
+  mergeEarningsPlans,
+  mergeLaunchScans,
+  planKitV2EarningsAcross,
+  readKitV2EarningsAcross,
+  readKitV2LaunchesAcross,
+  scanOfLaunch,
   readTokenMeta,
   KIT_V2_LAUNCH_CREATED_EVENT,
   KIT_V2_LAUNCH_LEG_CREATED_EVENT,
@@ -348,6 +361,56 @@ export {
      the creating transaction's receipt - the kit stores no record of it. */
   launchAllocationFromLogs,
   readLaunchAllocation,
+  /* The two generations of launch guard. "lp-fee": the fee is an LP fee, paid
+     out through the lockers. "quote-fee": the guard takes fee and tax itself,
+     in the quote currency, and on a buy leaves a share of the fee to the pool
+     as its LP fee. Read the bitmap off the guard before calling anything only
+     one of them has. */
+  GUARD_QUOTE_FEE_BIT,
+  LAUNCH_GUARD_BITMAPS,
+  guardGenerationOf,
+  guardGenerationOfKey,
+  launchSplitBounds,
+  readGuardBitmap,
+  readGuardGeneration,
+  /* A quote-fee guard's trade fee: how a pot splits, what a swap pays and
+     what must reach the pool, the refusal of a swap filled in part, and the
+     calls that settle the fee and hand its creator's share over. */
+  GUARD_FEE_PIPS_DENOMINATOR,
+  LAUNCH_FEE_SPLIT_LIMITS,
+  SWAP_NOT_FILLED_SELECTOR,
+  UNEXPECTED_REVERT_BYTES_ABI,
+  WRAPPED_ERROR_ABI,
+  decodeSwapNotFilled,
+  encodeAcceptFeeCreator,
+  encodeSettleFee,
+  encodeTransferFeeCreator,
+  feeCreatorIdOf,
+  guardChargePoint,
+  guardQuoteTake,
+  largestExactInputFor,
+  splitGuardPot,
+  /* The parts of that trade fee: what the pool charges a buy as its LP fee and
+     what the guard takes, read from the guard. A guard that does not answer
+     has a split nobody knows: `null`, never a share of zero. */
+  GUARD_LP_SHARE_LIMITS,
+  guardBuyCharges,
+  guardFeeParts,
+  guardSwapRates,
+  readGuardFeeParts,
+  readGuardLpShareBps,
+  /* A guard's fee for any second, from its schedule: both generations decay the
+     same way. For serving a rate from indexed logs; a caller with a chain reads
+     `currentFee(poolId)`. */
+  guardFeeAt,
+  guardFeePhaseAt,
+  /* An earnings read as calls: the balances to claim, the guard pots to
+     settle and the locks to collect, for either generation of guard. */
+  claimableTotals,
+  collectableLocks,
+  lockEarnsTradeFee,
+  planKitV2Earnings,
+  unsettledTotals,
 } from "./launchpad/index.js";
 export type {
   LaunchListingInput,
@@ -403,6 +466,9 @@ export type {
   LaunchListing,
   LaunchRecordV2,
   LaunchScanV2,
+  LaunchScansV2,
+  KitEarningsV2,
+  ReadKitV2LaunchesAcrossOptions,
   LegKindWord,
   KitV2LaunchCreatedLog,
   KitV2LaunchLegCreatedLog,
@@ -419,6 +485,30 @@ export type {
   DecodedTokenMetadata,
   TokenMetadata,
   TokenMetadataIssue,
+  EarningsCall,
+  EarningsCreditHolds,
+  EarningsCreditV2,
+  EarningsLockV2,
+  EarningsPlanV2,
+  EarningsPotPart,
+  EarningsPotV2,
+  EarningsTotalV2,
+  GuardBuyCharges,
+  GuardChargePoint,
+  GuardClaimableV2,
+  GuardFeeParts,
+  GuardFeePartsReading,
+  GuardFeePhase,
+  GuardFeeSchedule,
+  GuardGeneration,
+  GuardGenerationRead,
+  GuardGenerationReading,
+  GuardKind,
+  GuardPotSplit,
+  GuardSplitShares,
+  GuardSwapRates,
+  GuardTake,
+  SwapNotFilled,
 } from "./launchpad/index.js";
 
 // --- trading: router, quoter, position manager ------------------------------
@@ -496,7 +586,7 @@ export type { ParsedCid, ParsedIpfsUri } from "./ipfs.js";
 // --- deployed addresses ----------------------------------------------------
 // The address book: every deployed Latch contract, per chain, with token
 // decimals. THE single source of truth — `apps/web/src/lib/chain.ts` and the
-// `create-latch-dex` template both re-export this rather than restating it.
+// `create-latch-app` template both re-export this rather than restating it.
 // `null` means not-yet-deployed and is never the zero address; see the module
 // header for why that distinction is load-bearing.
 export * as deployments from "./deployments/index.js";
@@ -527,6 +617,9 @@ export {
   requireDeployment,
   requireDurationClock,
   requireLaunchpadV2,
+  launchpadV2Addresses,
+  launchpadV2GenerationOf,
+  launchpadV2Generations,
   revShareHookRecord,
   tokenByAddress,
   tokenBySymbol,
@@ -543,6 +636,8 @@ export {
 } from "./deployments/index.js";
 export type {
   ContractKey,
+  LaunchpadV2Book,
+  LaunchpadV2GenerationMatch,
   SafeContracts,
   DurationClock,
   RevShareHookRecord,
@@ -551,6 +646,7 @@ export type {
   LatchChainKey,
   LatchDeployment,
   LaunchpadV2Deployment,
+  RwaDeployment,
   NativeCurrency,
   RedeployableContract,
   TokenInfo,

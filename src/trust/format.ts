@@ -21,6 +21,7 @@ import type { Address } from "viem";
 import type {
   CreatorTaxFacts,
   LaunchFacts,
+  LaunchFeePartsFacts,
   PoolLiquidityFacts,
   PoolRegistryTrust,
   PoolTaxTrust,
@@ -182,9 +183,29 @@ export function describeLiquidity(s: TrustSection<PoolLiquidityFacts>, kind: Poo
 
 /* -------------------------------------------------------------------- fees --- */
 
+const LAUNCH_FEE_SOURCE = "Read from the launch guard: the fee decays from its opening value to the final one over the launch window.";
+
+/**
+ * Who receives a launch pool's trading fee, in words, for a guard that takes
+ * the fee itself. `parts` is what the guard answered; `null` or absent means it
+ * did not, and the sentence says so instead of assuming the pool's part is zero.
+ */
+export function describeLaunchFeeParts(parts: LaunchFeePartsFacts | null | undefined): string {
+  if (parts === null || parts === undefined) {
+    return "Paid in the pool's quote currency on every trade. How the fee is divided between the pool's liquidity providers and the launch guard could not be read.";
+  }
+  if (parts.buyLpPips === 0) {
+    return "Taken by the launch guard in the pool's quote currency on every trade, buys and sells alike. The pool's own LP fee is zero.";
+  }
+  return `On a buy, ${formatFeePips(parts.buyLpPips)} goes to the pool's liquidity providers and the launch guard takes ${formatFeePips(parts.buyGuardPips)}. On a sell the launch guard takes all of it. Every part is paid in the pool's quote currency.`;
+}
+
 export function describeLpFee(f: PoolTrust["lpFee"]): TrustLine {
   switch (f.kind) {
     case "launch-guard":
+      if (f.takenBy === "launch") {
+        return { headline: `${formatFeePips(f.pips)} trading fee now`, detail: `${describeLaunchFeeParts(f.parts)} ${LAUNCH_FEE_SOURCE}`, tone: "neutral" };
+      }
       return { headline: `${formatFeePips(f.pips)} LP fee now`, detail: "Read from the launch guard's currentFee: the fee decays from its opening value to the final one over the launch window.", tone: "neutral" };
     case "static":
       return { headline: `${formatFeePips(f.pips)} LP fee`, detail: "Static, fixed in the pool key.", tone: "neutral" };
@@ -211,13 +232,18 @@ export function describeProtocolFee(s: TrustSection<ProtocolFeeFacts>): TrustLin
 /* ------------------------------------------------------------- creator tax --- */
 
 /** The creator tax on one pool. `launchStatus` decides the words when the pool is not a launch-guard pool. */
-export function describeCreatorTax(t: PoolTaxTrust, chainNow: bigint): TrustLine {
+/**
+ * `takenBy` is the pool's `lpFee.takenBy`: where the guard takes the trading fee
+ * itself, it takes the creator tax in the pool's quote currency too, and the
+ * line says so.
+ */
+export function describeCreatorTax(t: PoolTaxTrust, chainNow: bigint, takenBy: "pool" | "launch" = "pool"): TrustLine {
   if (t.status === "not-a-launch-pool") return { headline: "Not a Latch launch pool", detail: "The pool's hook is not the Kit v2 launch guard, so there is no creator tax to read.", tone: "neutral" };
   if (t.status !== "read") return notRead(t);
-  return creatorTaxLine(t, chainNow);
+  return creatorTaxLine(t, chainNow, takenBy);
 }
 
-function creatorTaxLine(t: CreatorTaxFacts, chainNow: bigint): TrustLine {
+function creatorTaxLine(t: CreatorTaxFacts, chainNow: bigint, takenBy: "pool" | "launch"): TrustLine {
   if (t.tax === null) return { headline: "No creator tax", detail: "The launch guard's getTax reads zero for this pool.", tone: "neutral" };
   const x = t.tax;
   const split = `split ${formatTrustBps(x.creatorBps)} creator, ${formatTrustBps(x.protocolBps)} protocol${x.integratorBps > 0 ? `, ${formatTrustBps(x.integratorBps)} integrator` : ""}`;
@@ -226,7 +252,7 @@ function creatorTaxLine(t: CreatorTaxFacts, chainNow: bigint): TrustLine {
   }
   return {
     headline: `Creator tax: buy ${formatTrustBps(t.buyBpsNow)} · sell ${formatTrustBps(t.sellBpsNow)} now`,
-    detail: `Taken by the launch guard on each swap until ${formatTrustUtc(x.expiresAt)}, then zero with no transaction; ${split}. The rates and the split are frozen.`,
+    detail: `Taken by the launch guard ${takenBy === "launch" ? "in the pool's quote currency on each swap, buys and sells alike," : "on each swap"} until ${formatTrustUtc(x.expiresAt)}, then zero with no transaction; ${split}. The rates and the split are frozen.`,
     tone: "caution",
   };
 }

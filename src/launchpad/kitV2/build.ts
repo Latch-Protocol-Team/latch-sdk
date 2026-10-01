@@ -8,7 +8,7 @@
    call. Everything else - the pools, the seeded positions, the locks, the
    registry record - is a consequence of the argument built here.
 
-   Proven end to end on a Robinhood (4663) anvil fork as the create-latch-dex
+   Proven end to end on a Robinhood (4663) anvil fork as the create-latch-app
    template's `createLaunchV2.ts` (2026-09-17); moved here so the template, the
    hosted pad sites and the widgets build a launch through one implementation.
 
@@ -168,6 +168,22 @@ export interface BuiltLaunchV2 extends LaunchBuildV2 {
   readonly data: Hex;
   /** The predicted launch token, cross-checked against the kit. */
   readonly token: Address;
+}
+
+/**
+ * The bounds the launch's split has to fit. On a "quote-fee" guard the kit
+ * writes the lock's split into the guard as the trade fee's split, so the one
+ * split is checked by the locker AND by the guard: the tighter figure of each
+ * pair applies. On an "lp-fee" guard only the locker checks it.
+ */
+export function launchSplitBounds(limits: Pick<KitV2Limits, "locker" | "feeSplit">): KitV2Limits["locker"] {
+  const guard = limits.feeSplit ?? null;
+  if (guard === null) return limits.locker;
+  return {
+    minProtocolBps: Math.max(limits.locker.minProtocolBps, guard.minProtocolBps),
+    maxProtocolBps: Math.min(limits.locker.maxProtocolBps, guard.maxProtocolBps),
+    maxIntegratorBps: Math.min(limits.locker.maxIntegratorBps, guard.maxIntegratorBps),
+  };
 }
 
 function fraction(typed: string, actual: number): number {
@@ -339,7 +355,7 @@ export function buildLaunchParamsV2(draft: LaunchDraftV2, ctx: BuildLaunchV2Cont
     token,
     kit: env.kit,
     maxIntegratorLaunchFeeWei: limits.maxIntegratorLaunchFeeWei,
-    lockerBounds: limits.locker,
+    lockerBounds: launchSplitBounds(limits),
     taxBounds: limits.tax,
     ...(limits.tenant === null ? {} : { tenantConfig: limits.tenant, tenantAllowedQuotes: limits.tenantAllowedQuotes }),
   };

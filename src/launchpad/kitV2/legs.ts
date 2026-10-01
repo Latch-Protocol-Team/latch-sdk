@@ -9,7 +9,12 @@
      hooks         kit.clHook() for CL, kit.binHook() for Bin
      poolManager   kit.clPoolManager() / kit.binPoolManager()
      fee           0x800000, the dynamic-fee flag (a static fee would silently discard the guard's fee)
-     parameters    CL: bitmap 0x41 | tickSpacing << 16    Bin: bitmap 0x45 | binStep << 16
+     parameters    the guard's own bitmap | tickSpacing << 16 (CL) or | binStep << 16 (Bin)
+
+   THE BITMAP IS THE GUARD'S, NOT A CONSTANT. Core checks the low 16 bits of
+   `parameters` against what the hook answers from `getHooksRegistrationBitmap()`,
+   and two generations of guard answer differently (`./guardGeneration.js`). The
+   pool id hashes the whole key, so the wrong bitmap names a different pool.
 
    `computeKitV2LegKey` builds it off chain; `kit.computeLegKey(token, leg)` is
    the on-chain twin. `test/kitV2.test.ts` checks both kinds and both token sides
@@ -50,18 +55,40 @@ import {
 
 const MAX_UINT128 = (1n << 128n) - 1n;
 
-/** The four kit immutables a leg key is built from. Read them off the kit once. */
+/** The four kit immutables a leg key is built from, and what each guard registers. Read them off the kit once. */
 export interface KitV2LegEnv {
   readonly clHook: Address;
   readonly binHook: Address;
   readonly clPoolManager: Address;
   readonly binPoolManager: Address;
+  /**
+   * `getHooksRegistrationBitmap()` as `clHook` answers it; `readKitV2Env` fills it.
+   * `null`: the guard did not answer, and no CL leg key can be computed.
+   * ABSENT: the env was written by hand without it, and is taken to describe the
+   * "lp-fee" guards (0x08C1), the only ones that existed when such an env could
+   * be written. For a kit on any other guard that is the wrong pool id: pass it.
+   */
+  readonly clHookBitmap?: number | null;
+  /** The same for `binHook` (absent: 0x08C5). */
+  readonly binHookBitmap?: number | null;
 }
 
 export interface KitV2LegKey {
   readonly key: PoolKey;
   readonly poolId: Hex;
   readonly launchTokenIsCurrency0: boolean;
+}
+
+/** The bitmap a leg key carries: the guard's own answer, or the "lp-fee" one for an env that never read it. */
+function legBitmap(read: number | null | undefined, whenAbsent: number, guard: string): number {
+  if (read === undefined) return whenAbsent;
+  if (read === null) {
+    throw new RangeError(`the ${guard} guard did not answer getHooksRegistrationBitmap(); a leg key cannot be computed without it`);
+  }
+  if (!Number.isInteger(read) || read < 0 || read > 0xffff) {
+    throw new RangeError(`${read} is not a hook registration bitmap (a uint16)`);
+  }
+  return read;
 }
 
 /** True when the launch token sorts first: `uint160(token) < uint160(quote)`. */
@@ -91,7 +118,7 @@ export function computeKitV2LegKey(args: {
       hooks: args.env.clHook,
       poolManager: args.env.clPoolManager,
       fee: KIT_V2_LEG_FEE,
-      parameters: encodeCLPoolParameters(KIT_V2_CL_HOOK_BITMAP, args.tickSpacingOrBinStep),
+      parameters: encodeCLPoolParameters(legBitmap(args.env.clHookBitmap, KIT_V2_CL_HOOK_BITMAP, "CL"), args.tickSpacingOrBinStep),
     };
   } else if (args.kind === LEG_KIND.Bin) {
     key = {
@@ -100,7 +127,7 @@ export function computeKitV2LegKey(args: {
       hooks: args.env.binHook,
       poolManager: args.env.binPoolManager,
       fee: KIT_V2_LEG_FEE,
-      parameters: encodeBinPoolParameters(KIT_V2_BIN_HOOK_BITMAP, args.tickSpacingOrBinStep),
+      parameters: encodeBinPoolParameters(legBitmap(args.env.binHookBitmap, KIT_V2_BIN_HOOK_BITMAP, "Bin"), args.tickSpacingOrBinStep),
     };
   } else {
     throw new RangeError(`${args.kind} is not a LegKind (0 CL, 1 Bin)`);

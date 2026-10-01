@@ -50,6 +50,8 @@ export interface HolderExclusionRule {
 
 type ExclusionBook = Pick<LatchDeployment, "vault" | "clPoolManager" | "binPoolManager" | "positionLock" | "tokenLock" | "dropFactory" | "multisend"> & {
   readonly launchpadV2: Pick<LatchDeployment["launchpadV2"], "clLPLocker" | "binLPLocker" | "launchpadKitV2">;
+  /** Earlier kit generations still served; their lockers and kits hold launch liquidity too. */
+  readonly launchpadV2Retired?: readonly Pick<LatchDeployment["launchpadV2"], "clLPLocker" | "binLPLocker" | "launchpadKitV2">[];
 };
 
 /**
@@ -68,9 +70,11 @@ export function defaultHolderExclusions(book: ExclusionBook, token: Address): Ho
     [book.vault, "the Vault (every pool's reserves)"],
     [book.clPoolManager, "the CL pool manager"],
     [book.binPoolManager, "the Bin pool manager"],
-    [book.launchpadV2.clLPLocker, "the CL LP locker (locked launch liquidity)"],
-    [book.launchpadV2.binLPLocker, "the Bin LP locker (locked launch liquidity)"],
-    [book.launchpadV2.launchpadKitV2, "LaunchpadKitV2"],
+    ...[book.launchpadV2, ...(book.launchpadV2Retired ?? [])].flatMap((g): [Address | null, string][] => [
+      [g.clLPLocker, "the CL LP locker (locked launch liquidity)"],
+      [g.binLPLocker, "the Bin LP locker (locked launch liquidity)"],
+      [g.launchpadKitV2, "LaunchpadKitV2"],
+    ]),
     [book.positionLock, "LatchPositionLock (held for lock owners)"],
     [book.tokenLock, "LatchTokenLock (held for beneficiaries)"],
     [book.dropFactory, "LatchDropFactory"],

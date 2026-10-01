@@ -9,8 +9,10 @@
  *                 locks of `LatchPositionLock`, and any pools the caller names;
  *                 each described by:
  *     liquidity   `readPoolLocks` / `readClPoolPermanent` (CL), the Bin LP locker (Bin)
- *     LP fee      the launch guard's `currentFee(poolId)` on a guard pool; the
- *                 key's fee when static; "dynamic (hook-set)" otherwise
+ *     LP fee      the launch guard's `currentFee(poolId)` on a guard pool, and on
+ *                 a guard that takes the fee itself its `currentFeeParts` and
+ *                 `LP_SHARE_BPS` (what the pool charges a buy, what the guard
+ *                 takes); the key's fee when static; "dynamic (hook-set)" otherwise
  *     protocol    the pool manager's `getSlot0` protocol fee, both directions
  *     creator tax `getTax` + `currentTaxRates` on the launch guard
  *     registry    `LatchRegistry.isRegistered / getLatch` for the pool's hook
@@ -21,9 +23,13 @@
  * so a chain that does not answer at all is an error, not an empty panel.
  */
 
-import { BaseError, ContractFunctionRevertedError, ExecutionRevertedError, parseAbi, zeroAddress, type Address, type Hex, type PublicClient } from "viem";
+import { BaseError, parseAbi, zeroAddress, type Address, type Hex, type PublicClient } from "viem";
+
+import { isRevertError } from "../chains/revert.js";
 
 import { BIN_LAUNCH_GUARD_HOOK_ABI, LAUNCHPAD_KIT_V2_ABI, LAUNCH_GUARD_HOOK_ABI } from "../launchpad/generated/abi.js";
+import { readGuardFeeParts } from "../launchpad/kitV2/guardFees.js";
+import { guardGenerationOfKey } from "../launchpad/kitV2/guardGeneration.js";
 import { readTokenMeta } from "../launchpad/kitV2/reads.js";
 import { LATCH_HOOK_REGISTRY_ABI } from "../registry/generated/abi.js";
 import { decodeLatchRecord, summarizeLatch, type RawLatchRecord } from "../registry/types.js";
@@ -55,6 +61,12 @@ export interface TrustContracts {
   readonly clPoolManager: Address;
   readonly binPoolManager: Address;
   readonly launchpadKitV2?: Address | null;
+  /**
+   * Every kit generation the chain serves, the current one first (`launchpadV2Addresses(d,
+   * "launchpadKitV2")`). A token launched on an earlier kit is found on that kit; when given, this
+   * replaces `launchpadKitV2` for the lookup.
+   */
+  readonly launchpadKitsV2?: readonly Address[];
   /** Launch guards. Read from the kit when it is given; these are the fallback. */
   readonly clLaunchGuardHook?: Address | null;
   readonly binLaunchGuardHook?: Address | null;
@@ -101,10 +113,7 @@ const isZero = (a: string): boolean => /^0x0{40}$/i.test(a);
 
 /** A contract-level revert (as opposed to a transport failure). */
 export function isContractRevert(error: unknown): boolean {
-  return (
-    error instanceof BaseError &&
-    error.walk((x: unknown) => x instanceof ExecutionRevertedError || x instanceof ContractFunctionRevertedError) !== null
-  );
+  return isRevertError(error);
 }
 
 /** One short line for a failed read. */
@@ -170,7 +179,8 @@ export async function readTokenTrust(client: PublicClient, opts: ReadTokenTrustO
   const decimals = native ? nativeMeta.decimals : (meta?.decimals ?? null);
 
   /* ---- launch (Kit v2) and its legs */
-  const kit = c.launchpadKitV2 ?? null;
+  const kits = (c.launchpadKitsV2 ?? (c.launchpadKitV2 ? [c.launchpadKitV2] : [])).filter((k) => !isZero(k));
+  let kit: Address | null = kits[0] ?? null;
   let legs: { poolId: Hex; kind: PoolKind; lockId: bigint }[] = [];
   let clGuard: Address | null = c.clLaunchGuardHook ?? null;
   let binGuard: Address | null = c.binLaunchGuardHook ?? null;
@@ -178,18 +188,29 @@ export async function readTokenTrust(client: PublicClient, opts: ReadTokenTrustO
   if (kit === null) {
     launch = { status: "not-configured", reason: "Launches are coming soon on this chain" };
   } else {
-    const src: TrustSource = { contract: "LaunchpadKitV2", address: kit, call: "legsOf, getLaunch, getLeg" };
+    const src: { -readonly [K in keyof TrustSource]: TrustSource[K] } = { contract: "LaunchpadKitV2", address: kit, call: "legsOf, getLaunch, getLeg" };
     launch = await section<LaunchFacts>(src, async () => {
-      const [poolIds, rec, kitCl, kitBin] = await Promise.all([
-        client.readContract({ address: kit, abi: LAUNCHPAD_KIT_V2_ABI, functionName: "legsOf", args: [token] }),
-        client.readContract({ address: kit, abi: LAUNCHPAD_KIT_V2_ABI, functionName: "getLaunch", args: [token] }),
-        client.readContract({ address: kit, abi: LAUNCHPAD_KIT_V2_ABI, functionName: "clHook" }),
-        client.readContract({ address: kit, abi: LAUNCHPAD_KIT_V2_ABI, functionName: "binHook" }),
-      ]);
+      /* Every served kit is asked; the one that launched the token answers with legs. Its guards are
+         the token's guards, whichever generation it is. None did: the current kit's guards stand. */
+      const reads = await Promise.all(
+        kits.map((k) =>
+          Promise.all([
+            client.readContract({ address: k, abi: LAUNCHPAD_KIT_V2_ABI, functionName: "legsOf", args: [token] }),
+            client.readContract({ address: k, abi: LAUNCHPAD_KIT_V2_ABI, functionName: "getLaunch", args: [token] }),
+            client.readContract({ address: k, abi: LAUNCHPAD_KIT_V2_ABI, functionName: "clHook" }),
+            client.readContract({ address: k, abi: LAUNCHPAD_KIT_V2_ABI, functionName: "binHook" }),
+          ]),
+        ),
+      );
+      const at = Math.max(0, reads.findIndex(([ids, r]) => ids.length > 0 && !isZero(r.creator)));
+      const [poolIds, rec, kitCl, kitBin] = reads[at]!;
+      kit = kits[at]!;
+      src.address = kit;
       clGuard = kitCl;
       binGuard = kitBin;
       if (poolIds.length === 0 || isZero(rec.creator)) return { launch: null };
-      const legRecs = await Promise.all(poolIds.map((id) => client.readContract({ address: kit, abi: LAUNCHPAD_KIT_V2_ABI, functionName: "getLeg", args: [id] })));
+      const found = kit;
+      const legRecs = await Promise.all(poolIds.map((id) => client.readContract({ address: found, abi: LAUNCHPAD_KIT_V2_ABI, functionName: "getLeg", args: [id] })));
       legs = poolIds.map((poolId, i) => ({ poolId, kind: Number(legRecs[i]!.kind) === 1 ? "Bin" : "CL", lockId: legRecs[i]!.lockId }));
       return {
         launch: {
@@ -326,6 +347,8 @@ async function describePool(client: PublicClient, cand: Candidate, ctx: Describe
   const launchGuard = guard !== null && !isZero(hooks) && lower(hooks) === lower(guard);
   const guardAbi = cand.kind === "CL" ? LAUNCH_GUARD_HOOK_ABI : BIN_LAUNCH_GUARD_HOOK_ABI;
   const guardName = cand.kind === "CL" ? "LaunchGuardHook" : "BinLaunchGuardHook";
+  /* Core refuses a pool whose key carries another bitmap than its hook answers, so the key's is the guard's own. */
+  const takenBy = guardGenerationOfKey({ parameters: key[5] }, cand.kind) === "quote-fee" ? ("launch" as const) : ("pool" as const);
 
   const slot0Src: TrustSource = { contract: managerName, address: manager, call: "getSlot0" };
   const [liquidity, slot0, lpFee, tax, registry] = await Promise.all([
@@ -340,7 +363,7 @@ async function describePool(client: PublicClient, cand: Candidate, ctx: Describe
       const pf = decodeProtocolFee(Number(s[1]));
       return { zeroForOne: pf.zeroForOne, oneForZero: pf.oneForZero, lpFee: Number(s[2]) };
     }),
-    readLpFee(client, cand.poolId, Number(keyFee), launchGuard ? { address: hooks, abi: guardAbi, name: guardName } : null, { contract: managerName, address: manager, call: "poolIdToPoolKey (fee)" }),
+    readLpFee(client, cand.poolId, Number(keyFee), launchGuard ? { address: hooks, abi: guardAbi, name: guardName, takenBy } : null, { contract: managerName, address: manager, call: "poolIdToPoolKey (fee)" }),
     launchGuard ? readTax(client, cand.poolId, { address: hooks, abi: guardAbi, name: guardName }) : Promise.resolve<PoolTaxTrust>({ status: "not-a-launch-pool" }),
     readRegistry(client, hooks, c.registry ?? null),
   ]);
@@ -434,14 +457,25 @@ async function readLiquidity(client: PublicClient, cand: Candidate, ctx: Describ
   }
 }
 
-type GuardRef = { readonly address: Address; readonly abi: typeof LAUNCH_GUARD_HOOK_ABI | typeof BIN_LAUNCH_GUARD_HOOK_ABI; readonly name: string };
+type GuardRef = {
+  readonly address: Address;
+  readonly abi: typeof LAUNCH_GUARD_HOOK_ABI | typeof BIN_LAUNCH_GUARD_HOOK_ABI;
+  readonly name: string;
+  /** Who charges the fee, from the bitmap the pool's own key carries. */
+  readonly takenBy?: "pool" | "launch";
+};
 
 async function readLpFee(client: PublicClient, poolId: Hex, keyFee: number, guard: GuardRef | null, keySource: TrustSource): Promise<PoolTrust["lpFee"]> {
   if (guard !== null) {
-    const source: TrustSource = { contract: guard.name, address: guard.address, call: "currentFee" };
+    const takenBy = guard.takenBy ?? "pool";
+    const source: TrustSource = { contract: guard.name, address: guard.address, call: takenBy === "launch" ? "currentFee, currentFeeParts, LP_SHARE_BPS" : "currentFee" };
     try {
       const pips = await client.readContract({ address: guard.address, abi: guard.abi as typeof LAUNCH_GUARD_HOOK_ABI, functionName: "currentFee", args: [poolId] });
-      return { kind: "launch-guard", pips: Number(pips), source } satisfies LpFeeFacts;
+      if (takenBy !== "launch") return { kind: "launch-guard", pips: Number(pips), source, takenBy } satisfies LpFeeFacts;
+      /* Who receives which part: asked only of a guard that takes the fee itself. No answer is `null`, never a share of zero. */
+      const reading = await readGuardFeeParts(client, guard.address, poolId);
+      const parts = reading.parts === null ? null : { lpShareBps: reading.lpShareBps, ...reading.parts };
+      return { kind: "launch-guard", pips: Number(pips), source, takenBy, parts } satisfies LpFeeFacts;
     } catch (error) {
       if (isContractRevert(error)) return { kind: "dynamic", reason: "the launch guard's currentFee reverted for this pool", source };
       return { kind: "error", message: trustErrorMessage(error) };

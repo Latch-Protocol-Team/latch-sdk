@@ -1,6 +1,6 @@
 {
   "name": "@latchprotocol/sdk",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "description": "MIT TypeScript SDK for LatchProtocol — deployed contract addresses, pool key/id derivation, hook permission bitmaps, typed events, and the Latch registry. Build hooks without importing GPL Solidity.",
   "license": "MIT",
   "homepage": "https://latch.guru",

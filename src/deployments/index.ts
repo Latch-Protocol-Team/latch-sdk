@@ -12,7 +12,7 @@
    truth could rot.
 
    It had already started. `apps/web/src/lib/chain.ts` carried one copy and
-   `packages/create-latch-dex/template/src/config/deployments.ts` a second, and
+   `packages/create-latch-app/template/src/config/deployments.ts` a second, and
    the two had ALREADY diverged: the web copy knows the timelocks, the fee
    controller, the quoters and the position descriptor; the template copy does
    not. Neither was wrong, which is exactly the problem — two partial tables
@@ -53,7 +53,7 @@
    exception to plan around, so the shape is chosen for it:
 
      * ONE edit, in ONE file, per redeploy. Nothing downstream restates an
-       address; `apps/web` and the `create-latch-dex` template both import.
+       address; `apps/web` and the `create-latch-app` template both import.
      * `REDEPLOYABLE_CONTRACTS` names the keys whose address is a moving target,
        because the failure mode of a stale one is silent. A retired
        `LatchRegistry` still answers `latchCount()` with a number and renders as
@@ -249,6 +249,36 @@ export interface LaunchpadV2Deployment {
   readonly binLaunchGuardHook: Address | null;
   /** `LatchPadFactory`, bound to `launchpadKitV2`. No owner. */
   readonly padFactory: Address | null;
+}
+
+/**
+ * The stock / RWA contracts: market-hours and stock-pair hooks and the oracles
+ * they read. A hook address is part of pool identity, so every address here is
+ * a deploy, never a patch. `null` where not deployed.
+ *
+ * Owner of all four = the governance Safe (Ownership table). Read `owner()`
+ * rather than trusting this comment.
+ */
+export interface RwaDeployment {
+  /** `MarketHoursHook`: trading sessions, holidays and a price band on a stock pool. */
+  readonly marketHoursHook: Address | null;
+  /**
+   * `StockPairHook`: `MarketHoursHook` plus a per-pool compliance allowlist. It needs a trusted
+   * router that attests the end user, so it opens no pool until one is configured.
+   */
+  readonly stockPairHook: Address | null;
+  /** `ChainlinkPriceBandAdapter`: the band's reference price, read from Chainlink feeds. */
+  readonly chainlinkPriceBandAdapter: Address | null;
+  /** `AllowlistComplianceOracle`: the allowlist `StockPairHook` consults. */
+  readonly allowlistComplianceOracle: Address | null;
+  /**
+   * `ManualPriceBandOracle`: a band reference a bounded publisher posts, for a stock no feed prices.
+   * Owned by the CUSTODY timelock (its owner is exempt from the publisher bound), born with no
+   * publisher. Optional in the type so a partial devnet override need not name it.
+   */
+  readonly manualPriceBandOracle?: Address | null;
+  /** `PythPriceBandAdapter`: the band's reference from Pyth (pull oracle; `refresh` is permissionless). Owner: the Safe. */
+  readonly pythPriceBandAdapter?: Address | null;
 }
 
 
@@ -477,10 +507,42 @@ export interface LatchDeployment {
   readonly launchGuardHook: Address | null;
 
   /**
-   * The `LaunchpadKitV2` stack. NOT DEPLOYED on any chain as of 2026-09-14, so
-   * every slot is `null` on every chain. See `LaunchpadV2Deployment`.
+   * The CURRENT `LaunchpadKitV2` stack: the one a NEW launch and a NEW Launchpad go
+   * through. See `LaunchpadV2Deployment`. Every slot is `null` on a chain without a kit.
+   *
+   * Only half the story for a READER: a hook address is part of pool identity, so a kit
+   * that has been superseded keeps its launches, pools, locks and Launchpads forever.
+   * Anything that lists or reads launches, pools, earnings, locks or Launchpads iterates
+   * `launchpadV2Generations(d)` (current first, then `launchpadV2Retired`), never this
+   * field alone, or every launch of an earlier generation disappears.
    */
   readonly launchpadV2: LaunchpadV2Deployment;
+
+  /**
+   * EARLIER kit v2 generations that are still SERVED: nothing new is created through them,
+   * but their launches, pools, locks, fee credits and Launchpads live on and must still be
+   * read. Newest first. Empty where the chain has only ever had one generation.
+   *
+   * Contracts a generation shares with another (the lockers and the token factory were
+   * reused when the quote-fee guards shipped, 2026-09-28) appear in both records; readers
+   * dedupe with `launchpadV2Addresses`. Tell generations' BEHAVIOUR apart by the guard's
+   * bitmap (`guardGenerationOf`), never by which list an address sits in.
+   */
+  readonly launchpadV2Retired: readonly LaunchpadV2Deployment[];
+
+  /**
+   * `LatchLaunchAndBuy`: create a launch and make the creator's first buy in one transaction.
+   * Bound at construction to ONE kit (its `KIT()`), which is `launchpadV2.launchpadKitV2`
+   * whenever this is set. `null` where it is not deployed.
+   */
+  readonly launchAndBuy: Address | null;
+  /**
+   * `LatchDynamicFeeHook` (CL): a dynamic fee for ordinary pools, with a protocol share of each swap's
+   * fee. `null` where not deployed.
+   */
+  readonly dynamicFeeHook: Address | null;
+  /** `LatchBinDynamicFeeHook`: the Bin twin. `null` where not deployed. */
+  readonly binDynamicFeeHook: Address | null;
 
   /**
    * `LatchSplitFactory` (Team splits): clones a `LatchSplit` per team. Owner =
@@ -508,6 +570,12 @@ export interface LatchDeployment {
   readonly tokenLock: Address | null;
   readonly multisend: Address | null;
   readonly dropFactory: Address | null;
+
+  /**
+   * Stock / RWA hooks and oracles. See `RwaDeployment`. Every slot is `null` on a chain where
+   * they are not deployed.
+   */
+  readonly rwa: RwaDeployment;
 
   /* -- duration clocks ----------------------------------------------------- */
 
@@ -638,21 +706,54 @@ const DEPLOYMENTS_TABLE = {
        both are bound to the retired Vault and managers. */
     launchpadKit: null,
     launchGuardHook: null,
+    /* The quote-fee generation (guards 0x0CC1 / 0x0CC5, LP_SHARE_BPS 2000), deployed 2026-10-01 by the
+       mainnet session and read back on chain by ops/deploy/promote-quote-fee.mjs. The lockers and token
+       factory are the first generation's, reused. New launches and new Launchpads go here only. */
     launchpadV2: {
-      launchpadKitV2: "0x19789C58f0d648146a698D6d3fAAA40Abb3e68a8",
-      launchLegs: "0x1978bCCCe1CfaCD456a1908fe1c8c3198203917A",
+      launchpadKitV2: "0x1978ff1B0082b4C9d3077787CDAeBc0FDbB7E556",
+      launchLegs: "0x19782d65c91dEd0DaEFB8791cDF5c4de41650636",
       launchTokenFactory: "0x197865Bf8bEb9d597feAfd39136d5aDA2e8DBcD7",
       clLPLocker: "0x1978ECb2789423aE7fB4020dD432bc614741206c",
       binLPLocker: "0x1978029ec07FF1E85FA1fF53d430322D08F8F01f",
-      clLaunchGuardHook: "0x1978493942bDE85721d047655Cee31Ef57C0303f",
-      binLaunchGuardHook: "0x19785eB03DFeFea2371cc5C5Cd7130B5D829C195",
-      padFactory: "0x1978b82718FfbE0f0D2Ab0FfDc575b87fAfeca1C",
+      clLaunchGuardHook: "0x1978B3318dfd051F692a14A6583601aCD0C8f583",
+      binLaunchGuardHook: "0x197865dA5A462A975DDb4aAfd9aBe097E39AD447",
+      padFactory: "0x197866261f4CC2bE7eB64D1477Ec73D5661A89f5",
     },
+    /* The FIRST generation, retired 2026-10-01: nothing new is created through it; its launches, pools,
+       locks and Launchpads are served forever. */
+    launchpadV2Retired: [
+      {
+        launchpadKitV2: "0x19789C58f0d648146a698D6d3fAAA40Abb3e68a8",
+        launchLegs: "0x1978bCCCe1CfaCD456a1908fe1c8c3198203917A",
+        launchTokenFactory: "0x197865Bf8bEb9d597feAfd39136d5aDA2e8DBcD7",
+        clLPLocker: "0x1978ECb2789423aE7fB4020dD432bc614741206c",
+        binLPLocker: "0x1978029ec07FF1E85FA1fF53d430322D08F8F01f",
+        clLaunchGuardHook: "0x1978493942bDE85721d047655Cee31Ef57C0303f",
+        binLaunchGuardHook: "0x19785eB03DFeFea2371cc5C5Cd7130B5D829C195",
+        padFactory: "0x1978b82718FfbE0f0D2Ab0FfDc575b87fAfeca1C",
+      },
+    ],
+    launchAndBuy: "0x19787F3082c5d74F91e65c0147d5F41D34cD2248",
+    dynamicFeeHook: null,
+    binDynamicFeeHook: null,
     splitFactory: "0x1978F55996c371A30CdE8CA8015B0D362b72Cd53",
     positionLock: "0x1978c7b933371bc4B238939De9dfE047653CFb85",
     tokenLock: "0x19784D694a07bB88380B1e9e3F5d6506190d2A7a",
     multisend: "0x1978DB38B8495b70FBa397b1F41f3dEd4A5FF2c2",
     dropFactory: "0x1978989f87B6F05000e2A0C04451114f1f50C04E",
+    /* Stock / RWA contracts, deployed 2026-09-28 at the same addresses on Base and Robinhood
+       (first receipt here: L2 block 74,541,365), owner = the Safe of record. Bitmaps read on
+       chain: MarketHoursHook 0x00C5, StockPairHook 0x00D5. No sequencer uptime feed on this
+       chain, so the adapter runs without one. */
+    rwa: {
+      marketHoursHook: "0x197846702522d9f61512EB2b6D9E1b03F24451CF",
+      stockPairHook: "0x1978C1Fa382cF89cF5b029abE826b341724688b4",
+      chainlinkPriceBandAdapter: "0x197839416764cf114185000bD7951Bc8f3DD31a5",
+      allowlistComplianceOracle: "0x1978721E66c3738110EF66D58e9340DecE38BD92",
+      /* Mined addresses 0x1978a523…c426 / 0x1978e484…692e: set when the mainnet session deploys them. */
+      manualPriceBandOracle: "0x1978A523bBBf1AD4C86C75E9843c1A8dDB0Bc426",
+      pythPriceBandAdapter: null,
+    },
 
     /* The redeployed stack is timestamp-clocked throughout. The retired block-numbered
        RevShareHooks below keep their own clock records for readers of their old pools. */
@@ -814,21 +915,54 @@ const DEPLOYMENTS_TABLE = {
     launchRegistry: "0x1978f09B8F8886251e2693566822b7aCC30faD59",
     launchpadKit: null,
     launchGuardHook: null,
+    /* The quote-fee generation (guards 0x0CC1 / 0x0CC5, LP_SHARE_BPS 2000), deployed 2026-10-01 by the
+       mainnet session and read back on chain by ops/deploy/promote-quote-fee.mjs. The lockers and token
+       factory are the first generation's, reused. New launches and new Launchpads go here only. */
     launchpadV2: {
-      launchpadKitV2: "0x19789C58f0d648146a698D6d3fAAA40Abb3e68a8",
-      launchLegs: "0x1978bCCCe1CfaCD456a1908fe1c8c3198203917A",
+      launchpadKitV2: "0x1978ff1B0082b4C9d3077787CDAeBc0FDbB7E556",
+      launchLegs: "0x19782d65c91dEd0DaEFB8791cDF5c4de41650636",
       launchTokenFactory: "0x197865Bf8bEb9d597feAfd39136d5aDA2e8DBcD7",
       clLPLocker: "0x1978ECb2789423aE7fB4020dD432bc614741206c",
       binLPLocker: "0x1978029ec07FF1E85FA1fF53d430322D08F8F01f",
-      clLaunchGuardHook: "0x1978493942bDE85721d047655Cee31Ef57C0303f",
-      binLaunchGuardHook: "0x19785eB03DFeFea2371cc5C5Cd7130B5D829C195",
-      padFactory: "0x1978b82718FfbE0f0D2Ab0FfDc575b87fAfeca1C",
+      clLaunchGuardHook: "0x1978B3318dfd051F692a14A6583601aCD0C8f583",
+      binLaunchGuardHook: "0x197865dA5A462A975DDb4aAfd9aBe097E39AD447",
+      padFactory: "0x197866261f4CC2bE7eB64D1477Ec73D5661A89f5",
     },
+    /* The FIRST generation, retired 2026-10-01: nothing new is created through it; its launches, pools,
+       locks and Launchpads are served forever. */
+    launchpadV2Retired: [
+      {
+        launchpadKitV2: "0x19789C58f0d648146a698D6d3fAAA40Abb3e68a8",
+        launchLegs: "0x1978bCCCe1CfaCD456a1908fe1c8c3198203917A",
+        launchTokenFactory: "0x197865Bf8bEb9d597feAfd39136d5aDA2e8DBcD7",
+        clLPLocker: "0x1978ECb2789423aE7fB4020dD432bc614741206c",
+        binLPLocker: "0x1978029ec07FF1E85FA1fF53d430322D08F8F01f",
+        clLaunchGuardHook: "0x1978493942bDE85721d047655Cee31Ef57C0303f",
+        binLaunchGuardHook: "0x19785eB03DFeFea2371cc5C5Cd7130B5D829C195",
+        padFactory: "0x1978b82718FfbE0f0D2Ab0FfDc575b87fAfeca1C",
+      },
+    ],
+    launchAndBuy: "0x19787F3082c5d74F91e65c0147d5F41D34cD2248",
+    dynamicFeeHook: null,
+    binDynamicFeeHook: null,
     splitFactory: "0x1978F55996c371A30CdE8CA8015B0D362b72Cd53",
     positionLock: "0x1978c7b933371bc4B238939De9dfE047653CFb85",
     tokenLock: "0x19784D694a07bB88380B1e9e3F5d6506190d2A7a",
     multisend: "0x1978DB38B8495b70FBa397b1F41f3dEd4A5FF2c2",
     dropFactory: "0x1978989f87B6F05000e2A0C04451114f1f50C04E",
+    /* Stock / RWA contracts, deployed 2026-09-28 at the same addresses on Base and Robinhood
+       (first receipt here: block 51,891,308), owner = the Safe of record. Bitmaps read on
+       chain: MarketHoursHook 0x00C5, StockPairHook 0x00D5. The adapter reads Base's sequencer
+       uptime feed 0xBCF8…6433 with a 3600 s grace. */
+    rwa: {
+      marketHoursHook: "0x197846702522d9f61512EB2b6D9E1b03F24451CF",
+      stockPairHook: "0x1978C1Fa382cF89cF5b029abE826b341724688b4",
+      chainlinkPriceBandAdapter: "0x197839416764cf114185000bD7951Bc8f3DD31a5",
+      allowlistComplianceOracle: "0x1978721E66c3738110EF66D58e9340DecE38BD92",
+      /* Mined addresses 0x1978a523…c426 / 0x1978e484…692e: set when the mainnet session deploys them. */
+      manualPriceBandOracle: "0x1978A523bBBf1AD4C86C75E9843c1A8dDB0Bc426",
+      pythPriceBandAdapter: null,
+    },
 
     durationClocks: {
       revShareHook: "timestamp",
@@ -897,12 +1031,13 @@ const DEPLOYMENTS_TABLE = {
     clPoolManagerOwner: null,
     binPoolManagerOwner: null,
 
-    feeController: "0xc1b7A4e61A4B6ceBA3e308425dc2390c2CE57ea9",
-    /* V2 (0x5c43d541…) and V3 (0x19789d7f…) were DEPLOYED on 2026-09-25 but NOT
-       INSTALLED: `setProtocolFeeController` on each manager needs the core owner EOA
-       0x615C…7854, which the release session does not hold. So the managers still
-       answer V1, and these stay null because null means "what the managers actually
-       use", not "what exists". Installing them is two transactions by that key. */
+    /* LatchProtocolFeeControllerV4 (one to four immutable launch oracles: both kit generations
+       below), deployed 2026-09-28 and INSTALLED on both Sepolia managers: `protocolFeeController()`
+       read 0x19781f9f…07eE on each, 2026-09-28. Until then the managers answered V1
+       0xc1b7A4e6…7ea9; V2 (0x5c43d541…) and V3 (0x19789d7f…) were deployed 2026-09-25 and never
+       installed here. Whether it is still in force is a read, never this line. */
+    feeController: "0x19781f9f8412f283379bED8B892057408Ae007eE",
+    /* The two UPSTREAM ProtocolFeeController instances: never deployed on Sepolia. */
     clProtocolFeeController: null,
     binProtocolFeeController: null,
 
@@ -953,19 +1088,43 @@ const DEPLOYMENTS_TABLE = {
     /* Kit v1 was never deployed here and never will be: v2 is the release. */
     launchpadKit: null,
     launchGuardHook: "0x19787323459816B6E76dF78507363269a9458197",
-    /* The whole v2 stack, deployed 2026-09-25 from the release commit and exercised
-       live: two launches, two swaps, the creator
-       tax taken, settled and claimed. Every owner is the Safe of record. */
+    /* The SECOND generation (quote-fee guards), deployed 2026-09-28 and read back by eth_call the
+       same day: kit 23,988 B whose clHook()/binHook() are the two guards below (bitmaps 0x0CC1 /
+       0x0CC5, 20,508 / 20,503 B), clLocker()/binLocker()/tokenFactory()/launchRegistry() the SAME
+       contracts as the first generation (reused, not redeployed), owner() the Safe of record;
+       LaunchLegs 22,778 B; the pad factory's KIT() is this kit. New launches and new Launchpads go
+       here only. */
     launchpadV2: {
-      launchpadKitV2: "0x1978DC12388ee2feda6cFDfD7245F543fB019cb8",
-      launchLegs: "0x1978367629505f09d16AEd93616A643E25a71550",
+      launchpadKitV2: "0x1978F03DC815F9e394aAA286ce9aE95a39fF0cB2",
+      launchLegs: "0x19784855F6805a297bf9b1010B51bf121CF255c7",
       launchTokenFactory: "0x1978c70a0e59A6b52477ce34dce050CfC3E4b4A5",
       clLPLocker: "0x1978D33E07d2ED2E155c3F168E3510D027C49A48",
       binLPLocker: "0x19787F213d0988005934A2F87dBD8E5c5E7A0d5E",
-      clLaunchGuardHook: "0x19787323459816B6E76dF78507363269a9458197",
-      binLaunchGuardHook: "0x1978A3f6d11C9a6cAEa0Df547CbE54A3fa7280f7",
-      padFactory: "0x19781ED911c36E5303c972545A31736C94D18604",
+      clLaunchGuardHook: "0x19786A7169f9934D114aE47315FFD4204d23d480",
+      binLaunchGuardHook: "0x1978Fa6D62309C184CF964Df64ce7cB8c7f9500D",
+      padFactory: "0x1978B16684f4E2317718898582e0E0E48E0D7622",
     },
+    /* The FIRST generation, deployed 2026-09-25 from the release commit and exercised live (two
+       launches, two swaps, the creator tax taken, settled and claimed). Retired 2026-09-28: nothing
+       new is created through it, and its launches, pools, locks and Launchpads are served forever. */
+    launchpadV2Retired: [
+      {
+        launchpadKitV2: "0x1978DC12388ee2feda6cFDfD7245F543fB019cb8",
+        launchLegs: "0x1978367629505f09d16AEd93616A643E25a71550",
+        launchTokenFactory: "0x1978c70a0e59A6b52477ce34dce050CfC3E4b4A5",
+        clLPLocker: "0x1978D33E07d2ED2E155c3F168E3510D027C49A48",
+        binLPLocker: "0x19787F213d0988005934A2F87dBD8E5c5E7A0d5E",
+        clLaunchGuardHook: "0x19787323459816B6E76dF78507363269a9458197",
+        binLaunchGuardHook: "0x1978A3f6d11C9a6cAEa0Df547CbE54A3fa7280f7",
+        padFactory: "0x19781ED911c36E5303c972545A31736C94D18604",
+      },
+    ],
+    /* LatchLaunchAndBuy, 2026-09-28: KIT() read 0x1978F03D…0cB2, the current kit. 13,982 B. */
+    launchAndBuy: "0x1978b47D72cC8319c5143c5080595Ca40b5D3682",
+    /* LatchDynamicFeeHook by its release script, 2026-09-29 (block 11,810,271); Sourcify match. */
+    dynamicFeeHook: "0x1978c104844d8a19a2a87470a93258f0bcd11b5d",
+    /* LatchBinDynamicFeeHook by its release script, 2026-09-29 (block 11,810,605); Sourcify match. */
+    binDynamicFeeHook: "0x1978bacc418add597918f41f4482bb4b8c539be7",
     splitFactory: "0x19789714b1fEa5dfECF0761cbAf4Fd1B6FC0728D",
     /* Latch utilities, REDEPLOYED 2026-09-25 by the RELEASE script
        (script/DeployLatchUtilities.s.sol), not by the 2026-09-19 showcase — the rule
@@ -979,6 +1138,16 @@ const DEPLOYMENTS_TABLE = {
     tokenLock: "0x1979481aad83348b537b12a320bd3771e0836Db4",
     multisend: "0x1979f6410B204A31E4f94587768a910Abd0aFAB4",
     dropFactory: "0x197961B758267BE455c9dEb94f9525978d30b392",
+    rwa: {
+      marketHoursHook: null,
+      stockPairHook: null,
+      chainlinkPriceBandAdapter: null,
+      allowlistComplianceOracle: null,
+      /* Rehearsal of the two release scripts, 2026-09-29 (blocks 11,805,783 / 11,805,789). Sepolia
+         has no custody timelock, so the Safe owns the Manual oracle here; no publisher is set. */
+      manualPriceBandOracle: "0x19780A4A5885Be3B0aFe4a7168e7C29bDB893B41",
+      pythPriceBandAdapter: "0x197836dE715dFaD38fB5531E3005b76FC017A0c8",
+    },
 
     durationClocks: {
       /* 0x1C86… is the OLD block-based hook and stays the address book's
@@ -1234,6 +1403,66 @@ export function requireLaunchpadV2(deployment: LatchDeployment): { readonly [K i
     );
   }
   return g as { readonly [K in keyof LaunchpadV2Deployment]: Address };
+}
+
+/** The part of a deployment the generation helpers read. `launchpadV2Retired` may be absent (a partial devnet override). */
+export interface LaunchpadV2Book {
+  readonly launchpadV2: LaunchpadV2Deployment;
+  readonly launchpadV2Retired?: readonly LaunchpadV2Deployment[] | undefined;
+}
+
+const isSet = (a: Address | null | undefined): a is Address => typeof a === "string" && !/^0x0{40}$/i.test(a);
+
+/**
+ * Every kit v2 generation a READER must serve on this chain: the current one first, then the
+ * retired ones, newest first. A generation with no kit recorded is left out. Creating a launch or
+ * a Launchpad uses `launchpadV2` alone; everything that lists or reads uses this.
+ */
+export function launchpadV2Generations(d: LaunchpadV2Book): readonly LaunchpadV2Deployment[] {
+  return [d.launchpadV2, ...(d.launchpadV2Retired ?? [])].filter((g) => isSet(g.launchpadKitV2));
+}
+
+/**
+ * One contract role across every served generation, deduplicated (case-insensitively, first
+ * spelling kept) and without nulls, current generation first. The lockers and the token factory
+ * are shared between generations, so this is how a reader watches each of them ONCE.
+ */
+export function launchpadV2Addresses(d: LaunchpadV2Book, key: keyof LaunchpadV2Deployment): readonly Address[] {
+  const seen = new Set<string>();
+  const out: Address[] = [];
+  for (const g of launchpadV2Generations(d)) {
+    const a = g[key];
+    if (!isSet(a) || seen.has(a.toLowerCase())) continue;
+    seen.add(a.toLowerCase());
+    out.push(a);
+  }
+  return out;
+}
+
+/** Which served generation a contract belongs to. */
+export interface LaunchpadV2GenerationMatch {
+  readonly generation: LaunchpadV2Deployment;
+  /** True for `launchpadV2`, the generation new launches go through. */
+  readonly current: boolean;
+  /** 0 = current, 1 = the newest retired, and so on. */
+  readonly index: number;
+}
+
+/**
+ * The served generation whose `key` slot (the kit by default) is `address`, or `null` when no
+ * served generation has it. For a SHARED contract (a locker) this is the newest generation that
+ * uses it; ask by kit, guard or pad factory when the generation matters.
+ */
+export function launchpadV2GenerationOf(
+  d: LaunchpadV2Book,
+  address: string,
+  key: keyof LaunchpadV2Deployment = "launchpadKitV2",
+): LaunchpadV2GenerationMatch | null {
+  const wanted = address.toLowerCase();
+  const all = launchpadV2Generations(d);
+  const index = all.findIndex((g) => g[key]?.toLowerCase() === wanted);
+  if (index < 0) return null;
+  return { generation: all[index]!, current: all[index] === d.launchpadV2, index };
 }
 
 export function explorerTxUrl(chainId: LatchChainId, hash: string): string {

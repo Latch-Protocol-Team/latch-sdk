@@ -41,9 +41,17 @@ export const BIN_SHAPE = {
 export type BinShapeName = keyof typeof BIN_SHAPE;
 export const BIN_SHAPE_NAMES = Object.keys(BIN_SHAPE) as readonly BinShapeName[];
 
-/** `LaunchpadKitV2.CL_HOOK_BITMAP`: `beforeInitialize | beforeSwap | afterSwap | afterSwapReturnsDelta` (the creator tax). */
+/**
+ * `CL_HOOK_BITMAP` of a kit on the "lp-fee" guards, the ones whose fee is an LP
+ * fee: `beforeInitialize | beforeSwap | afterSwap | afterSwapReturnsDelta`.
+ *
+ * NOT every kit's. A kit on the "quote-fee" guards carries 0x0CC1, and a leg's
+ * pool id contains the bitmap, so a key built with the wrong one names a pool
+ * that does not exist. `LAUNCH_GUARD_BITMAPS` (`./guardGeneration.js`) has both
+ * generations; `readKitV2Env` reads the one a kit's guards answer.
+ */
 export const KIT_V2_CL_HOOK_BITMAP = 0x08c1;
-/** `LaunchpadKitV2.BIN_HOOK_BITMAP`: `beforeInitialize | beforeMint | beforeSwap | afterSwap | afterSwapReturnsDelta`. */
+/** `BIN_HOOK_BITMAP` of a kit on the "lp-fee" guards: the CL bitmap plus `beforeMint`. See `KIT_V2_CL_HOOK_BITMAP`. */
 export const KIT_V2_BIN_HOOK_BITMAP = 0x08c5;
 /**
  * The creator tax's bounds, constants in both guards' bytecode (`LaunchTaxModule`).
@@ -51,7 +59,10 @@ export const KIT_V2_BIN_HOOK_BITMAP = 0x08c5;
  * the deployed guard and is the authority.
  */
 export const LAUNCH_TAX_LIMITS = {
-  /** 10% of the unspecified amount, per direction. */
+  /**
+   * 10% per direction. Of the swap's unspecified amount on an "lp-fee" guard; of
+   * its quote amount, on every swap shape, on a "quote-fee" guard.
+   */
   MAX_TAX_BPS: 1_000,
   /** The protocol's floor on the split: 10% of every tax. Enforced by the guard, never by the kit. */
   MIN_PROTOCOL_BPS: 1_000,

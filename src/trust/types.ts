@@ -105,9 +105,42 @@ export interface PoolLiquidityFacts {
   readonly measurable: boolean;
 }
 
+/**
+ * How a launch guard divides the trade fee, as the guard answers it. Rates are
+ * hundredths of a bip. Every part is paid in the pool's quote currency.
+ */
+export interface LaunchFeePartsFacts {
+  /** `LP_SHARE_BPS()`: the share of a buy's fee the guard leaves to the pool, basis points. `null`: not answered. */
+  readonly lpShareBps: number | null;
+  /** What the pool charges a buy as its LP fee, paid to its liquidity providers. */
+  readonly buyLpPips: number;
+  /** What the guard takes from a buy. */
+  readonly buyGuardPips: number;
+  /** What the guard takes from a sell: the whole fee. The pool charges a sell nothing. */
+  readonly sellGuardPips: number;
+}
+
 export type LpFeeFacts =
-  /** The launch guard's `currentFee(poolId)`: the LP fee a swap pays now, pips. */
-  | { readonly kind: "launch-guard"; readonly pips: number; readonly source: TrustSource }
+  /**
+   * The launch guard's `currentFee(poolId)`: the fee a swap pays now, pips.
+   *
+   * `takenBy` says who charges it, from the pool key's own bitmap. `"pool"` (or
+   * absent): it is the pool's LP fee, taken from what a swap pays in. `"launch"`:
+   * the fee is paid in the pool's quote currency on every swap, and the guard
+   * takes it itself, except the part of a BUY's fee it leaves to the pool as the
+   * pool's LP fee (`parts`); a creator tax is taken by the guard, in the quote.
+   *
+   * `parts`, on `"launch"` only: what the guard answered when asked how the fee
+   * is divided (`LP_SHARE_BPS`, `currentFeeParts`). `null` when it did not
+   * answer: the split is then unknown, NOT zero. Absent on `"pool"`.
+   */
+  | {
+      readonly kind: "launch-guard";
+      readonly pips: number;
+      readonly source: TrustSource;
+      readonly takenBy?: "pool" | "launch";
+      readonly parts?: LaunchFeePartsFacts | null;
+    }
   /** A static fee from the pool key, pips. */
   | { readonly kind: "static"; readonly pips: number; readonly source: TrustSource }
   /** Dynamic: the hook sets it per swap and it could not be read as one number. */
