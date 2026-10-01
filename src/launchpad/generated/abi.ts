@@ -1249,7 +1249,7 @@ export const LAUNCHPAD_KIT_ABI = [
 /**
  * `LaunchGuardHook` - the CL launch hook the kit drives.
  *
- * 41 errors, 15 events, 51 functions - curated from the compiled artifact, not the full ABI.
+ * 42 errors, 15 events, 51 functions - curated from the compiled artifact, not the full ABI.
  */
 export const LAUNCH_GUARD_HOOK_ABI = [
   {
@@ -1597,6 +1597,27 @@ export const LAUNCH_GUARD_HOOK_ABI = [
         "name": "declared",
         "type": "uint16",
         "internalType": "uint16"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "StartTimeAfterOpenDeadline",
+    "inputs": [
+      {
+        "name": "poolId",
+        "type": "bytes32",
+        "internalType": "PoolId"
+      },
+      {
+        "name": "startTime",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "openDeadline",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },
@@ -3461,7 +3482,7 @@ export const LAUNCH_GUARD_HOOK_ABI = [
 /**
  * `BinLaunchGuardHook` - the liquidity-book variant, including `beforeMint`.
  *
- * 43 errors, 15 events, 51 functions - curated from the compiled artifact, not the full ABI.
+ * 44 errors, 15 events, 51 functions - curated from the compiled artifact, not the full ABI.
  */
 export const BIN_LAUNCH_GUARD_HOOK_ABI = [
   {
@@ -3814,6 +3835,27 @@ export const BIN_LAUNCH_GUARD_HOOK_ABI = [
         "name": "declared",
         "type": "uint16",
         "internalType": "uint16"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "StartTimeAfterOpenDeadline",
+    "inputs": [
+      {
+        "name": "poolId",
+        "type": "bytes32",
+        "internalType": "PoolId"
+      },
+      {
+        "name": "startTime",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "openDeadline",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },
@@ -15032,7 +15074,7 @@ export const LATCH_POSITION_LOCK_ABI = [
 /**
  * `LatchTokenLock` - ERC-20 / native time-locks and cliff + linear vesting with a fixed schedule; two-step beneficiary; flat native fee per lock (`LatchFeeGate`).
  *
- * 25 errors, 12 events, 30 functions - curated from the compiled artifact, not the full ABI.
+ * 26 errors, 12 events, 31 functions - curated from the compiled artifact, not the full ABI.
  */
 export const LATCH_TOKEN_LOCK_ABI = [
   {
@@ -15275,6 +15317,22 @@ export const LATCH_TOKEN_LOCK_ABI = [
     "type": "error",
     "name": "ReentrancyGuardReentrantCall",
     "inputs": []
+  },
+  {
+    "type": "error",
+    "name": "ReleaseNotAllowed",
+    "inputs": [
+      {
+        "name": "lockId",
+        "type": "uint256",
+        "internalType": "uint256"
+      },
+      {
+        "name": "beneficiary",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
   },
   {
     "type": "error",
@@ -16038,6 +16096,25 @@ export const LATCH_TOKEN_LOCK_ABI = [
       }
     ],
     "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "release",
+    "inputs": [
+      {
+        "name": "lockId",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "amount",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
   },
   {
     "type": "function",
